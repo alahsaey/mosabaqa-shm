@@ -143,7 +143,7 @@ export const INITIAL_CATEGORIES: Category[] = [
     difficulty: 'medium',
     targetQuestionCount: 15,
     allowedQuestionTypes: ['multiple_choice', 'historical', 'islamic_figures', 'complete_phrase'],
-    imageUrl: BRAND_ASSETS.categoryReligious,
+    imageUrl: BRAND_ASSETS.categoryProphet,
     sourceUrl: 'https://shiaonlinelibrary.com/',
     isActive: true,
     questions: [
@@ -165,7 +165,7 @@ export const INITIAL_CATEGORIES: Category[] = [
     difficulty: 'medium',
     targetQuestionCount: 15,
     allowedQuestionTypes: ['who_said', 'complete_phrase', 'multiple_choice', 'doctrinal'],
-    imageUrl: BRAND_ASSETS.categoryReligious,
+    imageUrl: BRAND_ASSETS.categoryNehj,
     sourceUrl: 'https://balaghah.net/',
     isActive: true,
     questions: [
@@ -184,7 +184,7 @@ export const INITIAL_CATEGORIES: Category[] = [
     difficulty: 'medium',
     targetQuestionCount: 15,
     allowedQuestionTypes: ['multiple_choice', 'historical', 'islamic_figures', 'complete_phrase'],
-    imageUrl: BRAND_ASSETS.categoryReligious,
+    imageUrl: BRAND_ASSETS.categoryZahra,
     sourceUrl: 'https://ar.wikishia.net/',
     isActive: true,
     questions: [
@@ -201,7 +201,7 @@ export const INITIAL_CATEGORIES: Category[] = [
     difficulty: 'medium',
     targetQuestionCount: 15,
     allowedQuestionTypes: ['multiple_choice', 'historical', 'islamic_figures', 'occasions_events'],
-    imageUrl: BRAND_ASSETS.categoryReligious,
+    imageUrl: BRAND_ASSETS.categoryImams,
     sourceUrl: 'https://ar.wikishia.net/',
     isActive: true,
     questions: [
@@ -220,7 +220,7 @@ export const INITIAL_CATEGORIES: Category[] = [
     difficulty: 'medium',
     targetQuestionCount: 12,
     allowedQuestionTypes: ['complete_phrase', 'doctrinal', 'multiple_choice'],
-    imageUrl: BRAND_ASSETS.categoryCulture,
+    imageUrl: BRAND_ASSETS.categoryRisalat,
     sourceUrl: 'https://sajjadia.com/',
     isActive: true,
     questions: [
@@ -237,7 +237,7 @@ export const INITIAL_CATEGORIES: Category[] = [
     difficulty: 'easy',
     targetQuestionCount: 15,
     allowedQuestionTypes: ['complete_phrase', 'multiple_choice'],
-    imageUrl: BRAND_ASSETS.categoryReligious,
+    imageUrl: BRAND_ASSETS.categoryQuran,
     sourceUrl: 'https://tanzil.net/',
     isActive: true,
     questions: [
@@ -254,7 +254,7 @@ export const INITIAL_CATEGORIES: Category[] = [
     difficulty: 'medium',
     targetQuestionCount: 12,
     allowedQuestionTypes: ['islamic_figures', 'historical', 'multiple_choice'],
-    imageUrl: BRAND_ASSETS.categoryScience,
+    imageUrl: BRAND_ASSETS.categoryFigures,
     sourceUrl: 'https://ar.wikishia.net/',
     isActive: true,
     questions: [
@@ -271,7 +271,7 @@ export const INITIAL_CATEGORIES: Category[] = [
     difficulty: 'easy',
     targetQuestionCount: 12,
     allowedQuestionTypes: ['historical', 'multiple_choice', 'occasions_events'],
-    imageUrl: BRAND_ASSETS.categoryGeography,
+    imageUrl: BRAND_ASSETS.categoryIslamicGeography,
     sourceUrl: 'https://ar.wikishia.net/',
     isActive: true,
     questions: [

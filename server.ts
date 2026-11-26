@@ -2528,6 +2528,56 @@ ${compactTimedTranscript}`;
   app.get("/manifest.json", serveDynamicManifest);
   app.get("/manifest.webmanifest", serveDynamicManifest);
 
+  // Crafts a tailored English Islamic-heritage visual prompt from Arabic category metadata
+  app.post("/api/ai/craft-image-prompt", requireAdminAuth, async (req, res) => {
+    try {
+      const name = typeof req.body?.name === "string" ? req.body.name.trim() : "";
+      const description = typeof req.body?.description === "string" ? req.body.description.trim() : "";
+      const group = typeof req.body?.group === "string" ? req.body.group.trim() : "";
+
+      if (!name) {
+        return res.status(400).json({ error: "اسم القسم مطلوب لصياغة الوصف البصري." });
+      }
+
+      const ai = getAiClient();
+      if (!ai) {
+        return res.status(503).json({ error: "AI prompt service not configured" });
+      }
+
+      const resp = await callGeminiWithRetry(() =>
+        ai.models.generateContent({
+          model: "gemini-4-hydrogen",
+          contents: [
+            `You are an art director for an Islamic cultural quiz competition.`,
+            `Create ONE concise, vivid English photographic image prompt (45-65 words, single paragraph, no quotes, no markdown) representing this Arabic quiz category:`,
+            `Category Name: ${name}`,
+            `Group: ${group || "ثقافة وتراث"}`,
+            `Description: ${description || "قسم ثقافي ومعرفي تراثي"}`,
+            `Mandatory aesthetic rules:`,
+            `- Warm Islamic heritage fine-art still-life or historic architectural scene.`,
+            `- Dim warm golden lantern candlelight, deep midnight navy blue shadows, burnished antique gold and warm ivory parchment accents.`,
+            `- Feature concrete symbolic historic objects relevant to the category (e.g., antique illuminated manuscripts, brass astrolabe, carved wooden rihal, compass, lanterns, mosque arches, tasbih, reed calligraphy pen).`,
+            `- STRICTLY NO human figures, NO people, NO faces, NO silhouettes of persons, NO legible text overlays, NO watermarks.`,
+          ].join("\n"),
+          config: {
+            thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
+            temperature: 0.7,
+          },
+        })
+      );
+
+      const prompt = (resp.text || "").replace(/\s+/g, " ").replace(/^["']|["']$/g, "").trim();
+      if (!prompt || prompt.length < 20) {
+        return res.status(502).json({ error: "Empty visual prompt response" });
+      }
+
+      return res.json({ prompt });
+    } catch (err: any) {
+      console.warn("[AI IMAGE PROMPT] fallback triggered:", err?.message || err);
+      return res.status(503).json({ error: formatGeminiErrorMessage(err) });
+    }
+  });
+
   // Vite middleware with production-to-development fallback
   const distPath = path.join(process.cwd(), "dist");
   const hasBuild = fs.existsSync(path.join(distPath, "index.html"));

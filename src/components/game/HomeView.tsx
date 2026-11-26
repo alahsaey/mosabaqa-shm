@@ -14,7 +14,7 @@ import {
   Sparkles,
 } from 'lucide-react';
 import { Category, CompetitionConfig, ScoringSettings } from '../../types';
-import { BRAND_ASSETS, getCategoryFallbackImage } from '../../lib/assets';
+import { BRAND_ASSETS, getBespokeCategoryImage, resolveCategoryImage } from '../../lib/assets';
 import { BrandIcon } from '../ui/BrandIcon';
 import { DIFFICULTY_LABELS } from '../../constants';
 
@@ -260,13 +260,7 @@ export const HomeView: React.FC<HomeViewProps> = ({
               const approvedCount = (cat.questions || []).filter(
                 (q) => !q.reviewStatus || q.reviewStatus === 'approved'
               ).length;
-              const imgSrc =
-                cat.imageUrl &&
-                cat.imageUrl.trim() &&
-                !cat.imageUrl.includes('unsplash.com') &&
-                !cat.imageUrl.includes('pollinations.ai')
-                  ? cat.imageUrl
-                  : getCategoryFallbackImage(cat.group);
+              const imgSrc = resolveCategoryImage(cat);
 
               return (
                 <motion.div
@@ -281,9 +275,10 @@ export const HomeView: React.FC<HomeViewProps> = ({
                       src={imgSrc}
                       alt={cat.name}
                       loading="lazy"
+                      referrerPolicy="no-referrer"
                       className="w-full h-full object-cover opacity-85"
                       onError={(e) => {
-                        e.currentTarget.src = getCategoryFallbackImage(cat.group);
+                        e.currentTarget.src = getBespokeCategoryImage(cat);
                       }}
                     />
                     <div className="absolute inset-0 bg-gradient-to-t from-[#0B192C] via-[#0B192C]/35 to-transparent" />

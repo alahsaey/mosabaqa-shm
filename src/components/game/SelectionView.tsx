@@ -13,7 +13,7 @@ import {
   ShieldCheck,
 } from 'lucide-react';
 import { Category, CompetitionConfig, Team } from '../../types';
-import { getCategoryFallbackImage } from '../../lib/assets';
+import { getBespokeCategoryImage, resolveCategoryImage } from '../../lib/assets';
 import { BrandIcon } from '../ui/BrandIcon';
 import { DIFFICULTY_LABELS } from '../../constants';
 
@@ -517,13 +517,7 @@ export const SelectionView: React.FC<SelectionViewProps> = ({
                   !isSelectedByCurrent && currentSelectedCount >= requiredPerTeam;
                 const isDisabled = currentTeamLocked || isReservedByOther || isLimitReached;
 
-                const imgSrc =
-                  cat.imageUrl &&
-                  cat.imageUrl.trim() &&
-                  !cat.imageUrl.includes('unsplash.com') &&
-                  !cat.imageUrl.includes('pollinations.ai')
-                    ? cat.imageUrl
-                    : getCategoryFallbackImage(cat.group);
+                const imgSrc = resolveCategoryImage(cat);
 
                 return (
                   <button
@@ -547,11 +541,12 @@ export const SelectionView: React.FC<SelectionViewProps> = ({
                         src={imgSrc}
                         alt={cat.name}
                         loading="lazy"
+                        referrerPolicy="no-referrer"
                         className={`w-full h-full object-cover ${
                           isReservedByOther ? 'opacity-40' : 'opacity-80 group-hover:scale-105 transition-transform duration-300'
                         }`}
                         onError={(e) => {
-                          e.currentTarget.src = getCategoryFallbackImage(cat.group);
+                          e.currentTarget.src = getBespokeCategoryImage(cat);
                         }}
                       />
                       <div className="absolute inset-0 bg-gradient-to-t from-[#0B192C] via-[#0B192C]/35 to-transparent" />

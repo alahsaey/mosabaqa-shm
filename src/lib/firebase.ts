@@ -3,7 +3,16 @@ import { getAuth, GoogleAuthProvider, signInWithPopup } from 'firebase/auth';
 import { getFirestore, doc, getDocFromServer } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 
-const app = initializeApp(firebaseConfig);
+const runtimeApiKey =
+  (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_FIREBASE_API_KEY?.trim()) ||
+  firebaseConfig.apiKey;
+
+const effectiveFirebaseConfig = {
+  ...firebaseConfig,
+  apiKey: runtimeApiKey,
+};
+
+const app = initializeApp(effectiveFirebaseConfig);
 export const auth = getAuth(app);
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 
@@ -38,6 +47,10 @@ export const getAuthErrorMessage = (error: any): string => {
   if (!error) return "حدث خطأ غير متوقع أثناء تسجيل الدخول.";
   
   const code = typeof error === 'string' ? error : error?.code || '';
+
+  if (code.startsWith('auth/api-key-not-valid')) {
+    return "مفتاح Firebase API غير صالح أو تم تعطيله. يرجى تحديث المتغير VITE_FIREBASE_API_KEY في إعدادات الاستضافة بمفتاح صالح من Firebase Console.";
+  }
 
   switch (code) {
     case 'auth/popup-closed-by-user':
