@@ -1,0 +1,248 @@
+{
+  "entities": {
+    "Group": {
+      "title": "Group",
+      "description": "Category group classification",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "order": { "type": "number" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["name", "order"]
+    },
+    "Category": {
+      "title": "Category",
+      "description": "Competition Category",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "group": { "type": "string" },
+        "description": { "type": "string" },
+        "difficulty": { "type": "string" },
+        "targetQuestionCount": { "type": "number" },
+        "allowedQuestionTypes": { "type": "array" },
+        "linkedSourceIds": { "type": "array" },
+        "order": { "type": "number" },
+        "isActive": { "type": "boolean" }
+      },
+      "required": ["name"]
+    },
+    "Question": {
+      "title": "Question",
+      "description": "Category Question grounded in approved Shia sources",
+      "type": "object",
+      "properties": {
+        "categoryId": { "type": "string" },
+        "text": { "type": "string" },
+        "answer": { "type": "string" },
+        "questionType": { "type": "string" },
+        "difficulty": { "type": "string" },
+        "points": { "type": "number" },
+        "options": { "type": "array" },
+        "source": { "type": "string" },
+        "sourceName": { "type": "string" },
+        "sourceUrl": { "type": "string" },
+        "volumePageOrHadith": { "type": "string" },
+        "originalExcerpt": { "type": "string" },
+        "reviewStatus": { "type": "string" },
+        "needsManualVerification": { "type": "boolean" },
+        "videoUrl": { "type": "string" },
+        "videoSourceId": { "type": "string" },
+        "videoSourceName": { "type": "string" },
+        "videoSourceType": { "type": "string" },
+        "videoTotalDuration": { "type": "number" },
+        "videoClips": { "type": "array" },
+        "clipApproved": { "type": "boolean" },
+        "confidenceScore": { "type": "number" }
+      },
+      "required": ["categoryId", "text", "answer", "points"]
+    },
+    "VideoSource": {
+      "title": "VideoSource",
+      "description": "Approved cultural/educational video metadata, transcript segments, and source provenance",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "videoUrl": { "type": "string" },
+        "streamUrl": { "type": "string" },
+        "sourceType": { "type": "string" },
+        "approvedSourceId": { "type": "string" },
+        "sourceName": { "type": "string" },
+        "sourceUrl": { "type": "string" },
+        "totalDuration": { "type": "number" },
+        "thumbnailUrl": { "type": "string" },
+        "transcriptSegments": { "type": "array" },
+        "fullTranscript": { "type": "string" },
+        "status": { "type": "string" },
+        "statusMessage": { "type": "string" },
+        "restrictsDirectDownload": { "type": "boolean" },
+        "isApproved": { "type": "boolean" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["title", "videoUrl", "sourceType", "sourceName", "isApproved"]
+    },
+    "ApprovedSource": {
+      "title": "ApprovedSource",
+      "description": "Whitelisted Shia cultural and religious reference source",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "sourceType": { "type": "string" },
+        "author": { "type": "string" },
+        "publisher": { "type": "string" },
+        "url": { "type": "string" },
+        "classification": { "type": "string" },
+        "linkedCategoryIds": { "type": "array" },
+        "isApproved": { "type": "boolean" },
+        "verifiedExcerpt": { "type": "string" },
+        "lastCheckOk": { "type": "boolean" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["name", "sourceType", "isApproved"]
+    },
+    "AdminRole": {
+      "title": "AdminRole",
+      "description": "RBAC role and permissions for authorized staff",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "role": { "type": "string" },
+        "permissions": { "type": "object" },
+        "isActive": { "type": "boolean" }
+      },
+      "required": ["email", "role", "isActive"]
+    },
+    "AdminPasskey": {
+      "title": "AdminPasskey",
+      "description": "Server-verified WebAuthn public key credential (no raw biometric data)",
+      "type": "object",
+      "properties": {
+        "credentialId": { "type": "string" },
+        "publicKeyB64": { "type": "string" },
+        "counter": { "type": "number" },
+        "rpId": { "type": "string" },
+        "deviceName": { "type": "string" },
+        "isActive": { "type": "boolean" },
+        "integrityHash": { "type": "string" }
+      },
+      "required": ["credentialId", "publicKeyB64", "counter", "isActive", "integrityHash"]
+    },
+    "SecurityLog": {
+      "title": "SecurityLog",
+      "description": "Immutable security and authentication audit log",
+      "type": "object",
+      "properties": {
+        "eventType": { "type": "string" },
+        "email": { "type": "string" },
+        "deviceName": { "type": "string" },
+        "authMethod": { "type": "string" },
+        "result": { "type": "string" },
+        "details": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["eventType", "result"]
+    },
+    "ActivityLog": {
+      "title": "ActivityLog",
+      "description": "Admin CMS activity log",
+      "type": "object",
+      "properties": {
+        "action": { "type": "string" },
+        "targetType": { "type": "string" },
+        "targetName": { "type": "string" },
+        "actorEmail": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["action", "actorEmail"]
+    },
+    "GameSession": {
+      "title": "GameSession",
+      "description": "Game Session History, Category Reservations, and Synchronized Question Timer State",
+      "type": "object",
+      "properties": {
+        "creatorId": { "type": "string" },
+        "isCompleted": { "type": "boolean" },
+        "teams": { "type": "array" },
+        "winnerId": { "type": "string" },
+        "categories": { "type": "array" },
+        "duration": { "type": "number" },
+        "currentTurn": { "type": "string" },
+        "selectedCategoryId": { "type": "string" },
+        "selectedQuestionId": { "type": "string" },
+        "status": { "type": "string" },
+        "occupiedSlots": { "type": "array" },
+        "reservedCategoryMap": { "type": "object" },
+        "lockedTeamIds": { "type": "array" },
+        "selectionStageIndex": { "type": "number" },
+        "activeQuestionState": { "type": "object" }
+      }
+    },
+    "AppSettings": {
+      "title": "AppSettings",
+      "description": "Global Application & Scoring Settings",
+      "type": "object",
+      "properties": {
+        "competitionName": { "type": "string" },
+        "competitionSlogan": { "type": "string" },
+        "scoring": { "type": "object" },
+        "competitionConfig": { "type": "object" }
+      }
+    }
+  },
+  "firestore": {
+    "/groups/{groupId}": {
+      "schema": { "$ref": "#/entities/Group" },
+      "description": "Category groups"
+    },
+    "/categories/{categoryId}": {
+      "schema": { "$ref": "#/entities/Category" },
+      "description": "List of categories"
+    },
+    "/categories/{categoryId}/questions/{questionId}": {
+      "schema": { "$ref": "#/entities/Question" },
+      "description": "Questions inside a category"
+    },
+    "/questions/{questionId}": {
+      "schema": { "$ref": "#/entities/Question" },
+      "description": "Top-level questions"
+    },
+    "/approved_sources/{sourceId}": {
+      "schema": { "$ref": "#/entities/ApprovedSource" },
+      "description": "Whitelisted Shia reference sources"
+    },
+    "/video_sources/{videoId}": {
+      "schema": { "$ref": "#/entities/VideoSource" },
+      "description": "Approved video sources, transcripts, and scene timestamps"
+    },
+    "/admin_roles/{roleId}": {
+      "schema": { "$ref": "#/entities/AdminRole" },
+      "description": "Authorized admin & sub-admin permissions"
+    },
+    "/admin_passkeys/{passkeyId}": {
+      "schema": { "$ref": "#/entities/AdminPasskey" },
+      "description": "Registered WebAuthn passkeys for owner/admin"
+    },
+    "/security_logs/{logId}": {
+      "schema": { "$ref": "#/entities/SecurityLog" },
+      "description": "Security & authentication audit logs"
+    },
+    "/activity_logs/{logId}": {
+      "schema": { "$ref": "#/entities/ActivityLog" },
+      "description": "Admin CMS activity logs"
+    },
+    "/sessions/{sessionId}": {
+      "schema": { "$ref": "#/entities/GameSession" },
+      "description": "Recorded and live game sessions"
+    },
+    "/game_sessions/{sessionId}": {
+      "schema": { "$ref": "#/entities/GameSession" },
+      "description": "Legacy recorded game sessions"
+    },
+    "/settings/{settingsId}": {
+      "schema": { "$ref": "#/entities/AppSettings" },
+      "description": "Global app settings"
+    }
+  }
+}

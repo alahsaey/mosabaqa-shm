@@ -1,0 +1,206 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedEmail() {
+      return isSignedIn()
+        && request.auth.token.email != null
+        && request.auth.token.email_verified == true;
+    }
+
+    function isOwner() {
+      return isVerifiedEmail()
+        && request.auth.token.email.lower() == 'alahsaey@gmail.com';
+    }
+
+    function hasActiveStaffRole() {
+      return isVerifiedEmail()
+        && exists(/databases/$(database)/documents/admin_roles/$(request.auth.token.email.lower()))
+        && get(/databases/$(database)/documents/admin_roles/$(request.auth.token.email.lower())).data.isActive == true;
+    }
+
+    function isStaff() {
+      return isOwner() || hasActiveStaffRole();
+    }
+
+    function hasPermission(perm) {
+      return isOwner() || (
+        hasActiveStaffRole()
+        && get(/databases/$(database)/documents/admin_roles/$(request.auth.token.email.lower())).data.permissions[perm] == true
+      );
+    }
+
+    // Test doc for connection check
+    match /test/{testId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // Groups
+    match /groups/{groupId} {
+      allow read: if true;
+      allow create, update, delete: if hasPermission('manage_categories');
+    }
+
+    // Categories and their subcollection questions
+    match /categories/{categoryId} {
+      allow read: if true;
+      allow create, update, delete: if hasPermission('manage_categories');
+
+      match /questions/{questionId} {
+        allow read: if true;
+        allow create, update, delete: if hasPermission('manage_questions') || hasPermission('approve_questions') || hasPermission('generate_ai');
+      }
+    }
+
+    // Top-level questions (legacy/compatibility)
+    match /questions/{questionId} {
+      allow read: if true;
+      allow create, update, delete: if hasPermission('manage_questions') || hasPermission('approve_questions');
+    }
+
+    // Approved Shia Reference Sources Whitelist
+    match /approved_sources/{sourceId} {
+      allow read: if isStaff() || resource.data.isApproved == true;
+      allow create, update, delete: if hasPermission('manage_sources');
+    }
+
+    // Approved Video Sources Library & Transcripts
+    match /video_sources/{videoId} {
+      allow read: if isStaff() || resource.data.isApproved == true;
+      allow create, update, delete: if hasPermission('manage_sources') || hasPermission('manage_questions') || hasPermission('generate_ai');
+    }
+
+    // RBAC Admin Roles (Owner manages all; staff can read own role)
+    match /admin_roles/{roleId} {
+      allow get: if isOwner() || (isVerifiedEmail() && request.auth.token.email.lower() == roleId.lower());
+      allow list: if isOwner();
+      allow create, update, delete: if isOwner();
+    }
+
+    // Server-verified WebAuthn Passkeys (stores only public keys & integrity seal, never raw biometric data)
+    match /admin_passkeys/{passkeyId} {
+      allow get, list: if true;
+      allow create, update, delete: if isOwner();
+    }
+
+    // Tamper-resistant Security Audit Logs
+    match /security_logs/{logId} {
+      allow read: if isOwner() || hasPermission('manage_security');
+      allow create: if request.resource.data.keys().hasAll(['eventType', 'result'])
+        && request.resource.data.eventType is string
+        && request.resource.data.eventType.size() <= 64
+        && request.resource.data.result in ['success', 'failed', 'blocked'];
+      allow update, delete: if false;
+    }
+
+    // Admin CMS Activity Logs
+    match /activity_logs/{logId} {
+      allow read: if isStaff();
+      allow create: if isStaff()
+        && request.resource.data.keys().hasAll(['action', 'actorEmail']);
+      allow update, delete: if false;
+    }
+
+    function teamsHaveDistinctCategories(teamsList) {
+      return !(teamsList is list)
+        || teamsList.size() < 2
+        || !(teamsList[0].selectedCategories is list)
+        || !(teamsList[1].selectedCategories is list)
+        || (
+          !(teamsList[0].selectedCategories.hasAny(teamsList[1].selectedCategories))
+          && (teamsList.size() < 3 || !(teamsList[2].selectedCategories is list) || (
+            !(teamsList[0].selectedCategories.hasAny(teamsList[2].selectedCategories))
+            && !(teamsList[1].selectedCategories.hasAny(teamsList[2].selectedCategories))
+          ))
+          && (teamsList.size() < 4 || !(teamsList[3].selectedCategories is list) || (
+            !(teamsList[0].selectedCategories.hasAny(teamsList[3].selectedCategories))
+            && !(teamsList[1].selectedCategories.hasAny(teamsList[3].selectedCategories))
+            && !(teamsList[2].selectedCategories.hasAny(teamsList[3].selectedCategories))
+          ))
+        );
+    }
+
+    function teamSelectionPreserved(idx) {
+      return resource.data.teams.size() <= idx
+        || request.resource.data.teams.size() <= idx
+        || !('id' in resource.data.teams[idx])
+        || !(resource.data.teams[idx].id in resource.data.lockedTeamIds)
+        || request.resource.data.teams[idx].selectedCategories == resource.data.teams[idx].selectedCategories;
+    }
+
+    function lockedTeamSelectionsPreserved() {
+      return !('lockedTeamIds' in resource.data)
+        || !(resource.data.lockedTeamIds is list)
+        || resource.data.lockedTeamIds.size() == 0
+        || !('teams' in resource.data)
+        || !(resource.data.teams is list)
+        || !('teams' in request.resource.data)
+        || !(request.resource.data.teams is list)
+        || (
+          teamSelectionPreserved(0)
+          && teamSelectionPreserved(1)
+          && teamSelectionPreserved(2)
+          && teamSelectionPreserved(3)
+        );
+    }
+
+    function occupiedSlotsPreserved() {
+      return !('occupiedSlots' in resource.data)
+        || !(resource.data.occupiedSlots is list)
+        || !('occupiedSlots' in request.resource.data)
+        || (request.resource.data.occupiedSlots is list
+          && request.resource.data.occupiedSlots.hasAll(resource.data.occupiedSlots));
+    }
+
+    // Sessions and their live reactions subcollection
+    match /sessions/{sessionId} {
+      allow read: if true;
+      allow create: if !('teams' in request.resource.data)
+        || teamsHaveDistinctCategories(request.resource.data.teams);
+      allow update: if (
+          !('teams' in request.resource.data)
+          || teamsHaveDistinctCategories(request.resource.data.teams)
+        )
+        && lockedTeamSelectionsPreserved()
+        && occupiedSlotsPreserved();
+      allow delete: if isOwner() || hasPermission('manage_settings');
+
+      match /reactions/{reactionId} {
+        allow read, create: if true;
+        allow update, delete: if isStaff();
+      }
+    }
+
+    // Legacy game_sessions (restricted to authorized staff/admins only)
+    match /game_sessions/{sessionId} {
+      allow read: if isStaff();
+      allow create, update, delete: if isOwner() || hasPermission('manage_settings');
+
+      match /reactions/{reactionId} {
+        allow read, write: if isStaff();
+      }
+    }
+
+    // Settings
+    match /settings/{settingsId} {
+      allow read: if true;
+      allow create, update, delete: if hasPermission('manage_settings') || hasPermission('manage_scoring');
+    }
+
+    // Live Reactions top-level
+    match /live_reactions/{reactionId} {
+      allow read, create: if true;
+      allow update, delete: if isStaff();
+    }
+
+    // Default deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
