@@ -279,9 +279,6 @@ export async function syncDynamicPwaBranding(input: DynamicPwaBrandingInput): Pr
   upsertHeadLink('icon', { type: iconType, sizes: '192x192', href: icon192 });
   upsertHeadLink('shortcut icon', { type: iconType, href: icon192 });
   upsertHeadLink('apple-touch-icon', { sizes: '180x180', href: appleTouchIcon });
-  if (!icon512.startsWith('data:')) {
-    upsertMeta('og:image', icon512, true);
-  }
 
   // 2. Build Dynamic Web App Manifest with absolute start_url/scope so Blob manifest works reliably
   const manifestPayload = {
