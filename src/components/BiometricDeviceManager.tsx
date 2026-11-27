@@ -10,45 +10,52 @@ import {
   Scan,
   Plus,
 } from 'lucide-react';
-import { auth } from '../lib/firebase';
-import { dataService } from '../lib/dataService';
 import { biometricService, detectDeviceName } from '../services/biometricService';
-import { AdminPasskeyRecord } from '../types';
+import { AdminPasskeyRecord, AuthSessionUser } from '../types';
 
 interface BiometricDeviceManagerProps {
+  currentUser: AuthSessionUser;
   playSound?: (type: 'correct' | 'wrong' | 'victory' | 'intro' | 'click') => void;
   onEnrollmentChange?: (hasPasskeys: boolean) => void;
 }
 
 export const BiometricDeviceManager: React.FC<BiometricDeviceManagerProps> = ({
+  currentUser,
   playSound,
   onEnrollmentChange,
 }) => {
   const [passkeys, setPasskeys] = useState<AdminPasskeyRecord[]>([]);
   const [deviceLabel, setDeviceLabel] = useState('');
-  const [isSupported, setIsSupported] = useState(true);
+  const [isSupported, setIsSupported] = useState(false);
+  const [checkedSupport, setCheckedSupport] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [statusMessage, setStatusMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   const currentLocalId = biometricService.getLocalCredentialHint();
-  const isSignedInAsOwner =
-    auth.currentUser?.email?.toLowerCase() === 'alahsaey@gmail.com' && auth.currentUser?.emailVerified === true;
 
   useEffect(() => {
-    biometricService.isPlatformSupported().then(setIsSupported);
-    const unsub = dataService.subscribePasskeys((list) => {
+    biometricService.isPlatformSupported().then((supported) => {
+      setIsSupported(supported);
+      setCheckedSupport(true);
+    });
+
+    const unsub = biometricService.subscribePasskeys((list) => {
       setPasskeys(list);
       onEnrollmentChange?.(list.some((p) => p.isActive !== false));
-    });
+    }, currentUser.id);
+
     return () => unsub();
-  }, [onEnrollmentChange]);
+  }, [currentUser.id, onEnrollmentChange]);
 
   const handleEnroll = async () => {
     setIsProcessing(true);
     setStatusMessage(null);
     playSound?.('click');
 
-    const res = await biometricService.enrollDevice(deviceLabel || detectDeviceName());
+    const res = await biometricService.enrollDeviceForUser(
+      currentUser,
+      deviceLabel.trim() || detectDeviceName()
+    );
     setIsProcessing(false);
 
     if (res.success) {
@@ -56,7 +63,7 @@ export const BiometricDeviceManager: React.FC<BiometricDeviceManagerProps> = ({
       setDeviceLabel('');
       setStatusMessage({
         type: 'success',
-        text: 'تم تسجيل مفتاح البصمة والتحقق منه تشفيرياً على الخادم بنجاح.',
+        text: `تم تفعيل الدخول بالبصمة لحساب (@${currentUser.username}) على هذا الجهاز بنجاح.`,
       });
     } else {
       playSound?.('wrong');
@@ -72,20 +79,20 @@ export const BiometricDeviceManager: React.FC<BiometricDeviceManagerProps> = ({
     setStatusMessage(null);
     playSound?.('click');
 
-    const res = await biometricService.verifyBiometric();
+    const res = await biometricService.verifyBiometricLogin(currentUser.username);
     setIsProcessing(false);
 
     if (res.success) {
       playSound?.('correct');
       setStatusMessage({
         type: 'success',
-        text: 'نجح فحص المطابقة التشفيري لبصمة الجهاز عبر الخادم.',
+        text: 'نجح اختبار المطابقة بالبصمة بنجاح! يمكنك استخدام «الدخول بالبصمة 👆» من شاشة الدخول.',
       });
     } else {
       playSound?.('wrong');
       setStatusMessage({
         type: 'error',
-        text: res.error || 'فشلت مطابقة البصمة.',
+        text: res.error || 'فشل اختبار البصمة.',
       });
     }
   };
@@ -95,15 +102,15 @@ export const BiometricDeviceManager: React.FC<BiometricDeviceManagerProps> = ({
     setStatusMessage(null);
     playSound?.('click');
     try {
-      await biometricService.revokePasskey(pk.credentialId, pk.deviceName);
+      await biometricService.revokePasskey(pk.credentialId, currentUser.username);
       setStatusMessage({
         type: 'success',
-        text: `تم إزالة الجهاز (${pk.deviceName}) وإلغاء صلاحية بصمته فوراً.`,
+        text: `تم إلغاء تفعيل بصمة الجهاز (${pk.deviceName}) فوراً.`,
       });
     } catch (err: any) {
       setStatusMessage({
         type: 'error',
-        text: err?.message || 'تعذر حذف الجهاز.',
+        text: err?.message || 'تعذر حذف البصمة.',
       });
     } finally {
       setIsProcessing(false);
@@ -118,27 +125,39 @@ export const BiometricDeviceManager: React.FC<BiometricDeviceManagerProps> = ({
             <Fingerprint className="w-6 h-6" />
           </div>
           <div>
-            <h4 className="text-base font-bold text-white">الأجهزة الموثوقة وبصمة WebAuthn</h4>
+            <h4 className="text-base font-bold text-white">تفعيل وإدارة الدخول بالبصمة (WebAuthn)</h4>
             <p className="text-xs text-slate-300 mt-0.5">
-              يُحفظ المفتاح العام والتوقيع فقط دون أي صور أو بيانات حيوية خام
+              مرتبطة مباشرة بحسابك (<span className="font-mono text-[#D9B768]">@{currentUser.username}</span>) دون الحاجة لحساب Google
             </p>
           </div>
         </div>
 
-        {passkeys.length > 0 && (
-          <button
-            type="button"
-            onClick={handleTest}
-            disabled={isProcessing}
-            className="px-4 py-2 bg-[#13253E] hover:bg-[#1D3554] border border-[#C9A24D]/40 text-[#D9B768] rounded-xl text-xs font-bold flex items-center gap-2 cursor-pointer disabled:opacity-50"
+        <div className="flex items-center gap-2">
+          <span
+            className={`px-3 py-1.5 rounded-xl text-xs font-bold border ${
+              passkeys.length > 0
+                ? 'bg-emerald-500/15 border-emerald-400/40 text-emerald-300'
+                : 'bg-white/5 border-white/15 text-slate-300'
+            }`}
           >
-            <Scan className="w-4 h-4" />
-            <span>اختبار البصمة الآن</span>
-          </button>
-        )}
+            {passkeys.length > 0 ? `مفعّلة (${passkeys.length})` : 'غير مفعّلة'}
+          </span>
+
+          {passkeys.length > 0 && (
+            <button
+              type="button"
+              onClick={handleTest}
+              disabled={isProcessing}
+              className="px-4 py-1.5 bg-[#13253E] hover:bg-[#1D3554] border border-[#C9A24D]/40 text-[#D9B768] rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+            >
+              <Scan className="w-4 h-4" />
+              <span>اختبار البصمة</span>
+            </button>
+          )}
+        </div>
       </div>
 
-      {/* Registered Passkeys List */}
+      {/* Registered Passkeys List for Current User */}
       {passkeys.length > 0 ? (
         <div className="space-y-2.5">
           {passkeys.map((pk) => {
@@ -158,7 +177,7 @@ export const BiometricDeviceManager: React.FC<BiometricDeviceManagerProps> = ({
                       )}
                     </div>
                     <p className="text-[11px] text-slate-400 font-mono mt-0.5">
-                      ID: {pk.credentialId.slice(0, 14)}... • RP: {pk.rpId}
+                      ID: {pk.credentialId.slice(0, 14)}... • @{pk.username}
                     </p>
                   </div>
                 </div>
@@ -166,19 +185,18 @@ export const BiometricDeviceManager: React.FC<BiometricDeviceManagerProps> = ({
                 <div className="flex items-center gap-2">
                   <span className="inline-flex items-center gap-1 text-xs font-bold text-emerald-400">
                     <ShieldCheck className="w-4 h-4" />
-                    موثق
+                    مفعّل
                   </span>
-                  {isSignedInAsOwner && (
-                    <button
-                      type="button"
-                      onClick={() => handleRemove(pk)}
-                      disabled={isProcessing}
-                      className="p-2 text-rose-300 hover:text-rose-200 hover:bg-rose-500/20 rounded-lg transition-colors cursor-pointer"
-                      title="إلغاء وتجميد بصمة هذا الجهاز"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                  )}
+                  <button
+                    type="button"
+                    onClick={() => handleRemove(pk)}
+                    disabled={isProcessing}
+                    className="px-2.5 py-1.5 text-rose-300 hover:text-rose-100 hover:bg-rose-500/20 rounded-lg text-xs font-bold flex items-center gap-1 transition-colors cursor-pointer"
+                    title="إلغاء تفعيل بصمة هذا الجهاز"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>إلغاء</span>
+                  </button>
                 </div>
               </div>
             );
@@ -186,43 +204,37 @@ export const BiometricDeviceManager: React.FC<BiometricDeviceManagerProps> = ({
         </div>
       ) : (
         <div className="p-4 bg-[#13253E] rounded-xl border border-white/10 text-xs text-slate-300">
-          لا توجد أجهزة مسجلة بالبصمة حتى الآن.
+          لم تقم بتفعيل الدخول بالبصمة على حسابك بعد. فعّل البصمة أدناه لتسجيل الدخول بضغطة واحدة دون إعادة كتابة كلمة المرور.
         </div>
       )}
 
-      {/* Enrollment Form (requires verified owner sign-in) */}
-      {isSignedInAsOwner ? (
-        <div className="pt-2 border-t border-white/10 space-y-3">
-          {!isSupported && (
-            <div className="p-3 bg-amber-500/15 border border-amber-400/30 rounded-xl text-xs text-amber-200">
-              قد لا يدعم هذا المتصفح مستشعر بصمة نظام التشغيل، ولكن يمكنك تجربة تسجيل مفتاح أمان الجهاز.
-            </div>
-          )}
-
-          <div className="flex flex-col sm:flex-row gap-2.5">
-            <input
-              type="text"
-              value={deviceLabel}
-              onChange={(e) => setDeviceLabel(e.target.value)}
-              placeholder={`اسم الجهاز (مثال: ${detectDeviceName()})`}
-              className="flex-1 px-4 py-2.5 bg-[#13253E] border border-white/15 rounded-xl text-xs text-white placeholder:text-slate-400 focus:outline-none focus:border-[#C9A24D]"
-            />
-            <button
-              type="button"
-              onClick={handleEnroll}
-              disabled={isProcessing}
-              className="px-5 py-2.5 bg-[#C9A24D] hover:bg-[#D9B768] text-[#0B192C] font-bold text-xs rounded-xl flex items-center justify-center gap-2 transition-colors cursor-pointer disabled:opacity-50 whitespace-nowrap"
-            >
-              {isProcessing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
-              <span>تفعيل بصمة هذا الجهاز</span>
-            </button>
+      {/* Enrollment Form */}
+      <div className="pt-2 border-t border-white/10 space-y-3">
+        {checkedSupport && !isSupported && (
+          <div className="p-3 bg-amber-500/15 border border-amber-400/30 rounded-xl text-xs text-amber-200">
+            هذا المتصفح أو الجهاز لا يُظهر مستشعر بصمة مدمجاً (PublicKeyCredential). يرجى فتح الموقع عبر HTTPS على جهاز يدعم بصمة الإصبع أو الوجه أو Windows Hello.
           </div>
+        )}
+
+        <div className="flex flex-col sm:flex-row gap-2.5">
+          <input
+            type="text"
+            value={deviceLabel}
+            onChange={(e) => setDeviceLabel(e.target.value)}
+            placeholder={`اسم الجهاز (مثال: ${detectDeviceName()})`}
+            className="flex-1 px-4 py-2.5 bg-[#13253E] border border-white/15 rounded-xl text-xs text-white placeholder:text-slate-400 focus:outline-none focus:border-[#C9A24D]"
+          />
+          <button
+            type="button"
+            onClick={handleEnroll}
+            disabled={isProcessing}
+            className="px-5 py-2.5 bg-[#C9A24D] hover:bg-[#D9B768] text-[#0B192C] font-bold text-xs rounded-xl flex items-center justify-center gap-2 transition-colors cursor-pointer disabled:opacity-50 whitespace-nowrap"
+          >
+            {isProcessing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
+            <span>تفعيل بصمة هذا الجهاز</span>
+          </button>
         </div>
-      ) : (
-        <div className="p-3 bg-white/5 border border-white/10 rounded-xl text-xs text-slate-300">
-          لتسجيل جهاز بصمة جديد أو حذف جهاز مسجل، يلزم تسجيل الدخول المباشر بحساب المالك المعتمد (Google).
-        </div>
-      )}
+      </div>
 
       {statusMessage && (
         <div

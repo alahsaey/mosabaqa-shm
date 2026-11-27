@@ -1,28 +1,17 @@
-import { auth } from './firebase';
-import { biometricService } from '../services/biometricService';
+import { authService } from '../services/authService';
 
 /**
- * Builds authenticated headers for protected admin/staff backend endpoints.
- * Supports both Firebase Google Auth ID tokens and server-issued WebAuthn admin sessions.
+ * Builds authenticated headers for protected admin/staff backend endpoints
+ * using the in-memory server-verified session token.
  */
 export async function getAdminAuthHeaders(
   extraHeaders: Record<string, string> = {}
 ): Promise<Record<string, string>> {
   const headers: Record<string, string> = { ...extraHeaders };
 
-  try {
-    if (auth.currentUser) {
-      const idToken = await auth.currentUser.getIdToken();
-      if (idToken) {
-        headers.Authorization = `Bearer ${idToken}`;
-      }
-    }
-  } catch {
-    // Fall back to biometric session token if available
-  }
-
-  const adminSessionToken = biometricService.getStoredSessionToken();
+  const adminSessionToken = authService.getSessionToken();
   if (adminSessionToken) {
+    headers.Authorization = `Bearer ${adminSessionToken}`;
     headers['X-Admin-Session'] = adminSessionToken;
   }
 

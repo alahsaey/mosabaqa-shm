@@ -4,13 +4,11 @@
  */
 
 import React, { Suspense, lazy, useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { onAuthStateChanged, User, signOut } from 'firebase/auth';
-import { auth } from './lib/firebase';
 import { dataService, DBAppSettings, DBGameSession, DBGroup } from './lib/dataService';
 import {
   ActiveQuestionTimerState,
-  AdminRoleUser,
   ApprovedSource,
+  AuthSessionUser,
   Category,
   CompetitionConfig,
   GameSession,
@@ -26,7 +24,7 @@ import {
   INITIAL_APPROVED_SOURCES,
   INITIAL_CATEGORIES,
 } from './constants';
-import { biometricService } from './services/biometricService';
+import { authService } from './services/authService';
 import {
   DEFAULT_SOUND_VOLUMES,
   getSoundCategory,
@@ -62,7 +60,6 @@ const RecentCompetitions = lazy(() => import('./components/RecentCompetitions'))
 
 const ACTIVE_SESSION_STORAGE_KEY = 'abf_active_session_v2';
 const ACTIVE_SESSION_ID_KEY = 'abf_active_session_id_v2';
-const OWNER_EMAIL = 'alahsaey@gmail.com';
 
 function createInitialTeams(teamCount: number): Team[] {
   const palette = ['#0B192C', '#9B7729', '#0F766E', '#991B1B'];
@@ -87,12 +84,10 @@ export default function App() {
   const [showPublicSettings, setShowPublicSettings] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
 
-  // Auth & Admin Security State (zero localStorage trust bypasses)
-  const [currentUser, setCurrentUser] = useState<User | null>(null);
-  const [isAdmin, setIsAdmin] = useState(false);
-  const [isOwner, setIsOwner] = useState(false);
-  const [adminEmail, setAdminEmail] = useState('');
-  const [adminRoleUser, setAdminRoleUser] = useState<AdminRoleUser | null>(null);
+  // Custom Username/Password + WebAuthn Auth State (in-memory session)
+  const [authUser, setAuthUser] = useState<AuthSessionUser | null>(() => authService.getCurrentUser());
+  const isAdmin = Boolean(authUser);
+  const isOwner = authUser?.role === 'super_admin';
 
   // Firestore Live Data
   const [dbConnected, setDbConnected] = useState<'connecting' | 'connected' | 'error'>('connecting');
@@ -269,44 +264,11 @@ export default function App() {
     }
   }, [appSettings.enableSounds, appSettings.competitionConfig?.enableVisualEffects, appSettings.soundVolumes]);
 
-  // Verify Auth & Server Session
+  // Subscribe to custom in-memory auth session updates
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async (user) => {
-      setCurrentUser(user);
-      if (user && user.email && user.emailVerified) {
-        const lower = user.email.toLowerCase();
-        if (lower === OWNER_EMAIL) {
-          setIsAdmin(true);
-          setIsOwner(true);
-          setAdminEmail(lower);
-          setAdminRoleUser(null);
-          return;
-        }
-        const role = await dataService.getAdminRoleByEmail(lower);
-        if (role && role.isActive) {
-          setIsAdmin(true);
-          setIsOwner(false);
-          setAdminEmail(lower);
-          setAdminRoleUser(role);
-          return;
-        }
-      }
-
-      // Otherwise check if an active verified WebAuthn session token exists on server
-      const serverSession = await biometricService.verifyCurrentAdminSession();
-      if (serverSession.authenticated && serverSession.email) {
-        setIsAdmin(true);
-        setIsOwner(Boolean(serverSession.isOwner));
-        setAdminEmail(serverSession.email);
-        setAdminRoleUser(null);
-      } else {
-        setIsAdmin(false);
-        setIsOwner(false);
-        setAdminEmail('');
-        setAdminRoleUser(null);
-      }
+    return authService.subscribeSession((sessionUser) => {
+      setAuthUser(sessionUser);
     });
-    return () => unsub();
   }, []);
 
   // Live Firestore Subscriptions (Categories + Questions, Groups, Sources, Settings, Sessions count)
@@ -329,7 +291,7 @@ export default function App() {
       setSources(srcs);
     });
 
-    const unsubSessions = dataService.subscribeGameSessions(false, currentUser?.uid, (list) => {
+    const unsubSessions = dataService.subscribeGameSessions(false, authUser?.id, (list) => {
       setCompletedSessionsCount(list.filter((s) => s.isCompleted).length);
     });
 
@@ -374,11 +336,11 @@ export default function App() {
       unsubCategories();
       questionUnsubs.forEach((u) => u());
     };
-  }, [currentUser?.uid]);
+  }, [authUser?.id]);
 
   // Seed initial categories & Shia sources safely ONCE when owner/admin signs in and collections are empty
   useEffect(() => {
-    if (!isAdmin || !currentUser || seedingDoneRef.current) return;
+    if (!isAdmin || !authUser || seedingDoneRef.current) return;
     seedingDoneRef.current = true;
 
     (async () => {
@@ -393,7 +355,7 @@ export default function App() {
         }
       } catch {}
     })();
-  }, [isAdmin, currentUser]);
+  }, [isAdmin, authUser]);
 
   // Keep session categories fresh with live Firestore categories
   useEffect(() => {
@@ -533,7 +495,7 @@ export default function App() {
 
         const res = await dataService.saveGameSession(
           {
-            creatorId: currentUser?.uid || undefined,
+            creatorId: authUser?.id || undefined,
             createdAt: undefined,
             teams: nextSession.teams.map((t) => ({
               id: t.id,
@@ -576,7 +538,7 @@ export default function App() {
         return sessionId;
       }
     },
-    [dbConnected, categories, currentUser?.uid, sessionId]
+    [dbConnected, categories, authUser?.id, sessionId]
   );
 
   // Game Flow Handlers
@@ -681,7 +643,7 @@ export default function App() {
           skippedCount: t.skippedCount || 0,
         })),
         categoryNames: pickedCatNames,
-        creatorId: currentUser?.uid || undefined,
+        creatorId: authUser?.id || undefined,
       });
 
       setSession((prev) => ({
@@ -1110,28 +1072,15 @@ export default function App() {
     });
   };
 
-  const handleAdminAuthSuccess = (authInfo: {
-    email: string;
-    isOwner: boolean;
-    roleUser?: AdminRoleUser | null;
-  }) => {
-    setIsAdmin(true);
-    setIsOwner(authInfo.isOwner);
-    setAdminEmail(authInfo.email);
-    setAdminRoleUser(authInfo.roleUser || null);
+  const handleAdminAuthSuccess = (user: AuthSessionUser) => {
+    setAuthUser(user);
     setShowAuthModal(false);
     setViewMode('admin');
   };
 
   const handleAdminLogout = async () => {
-    await biometricService.logoutAdminSession();
-    if (auth.currentUser) {
-      await signOut(auth);
-    }
-    setIsAdmin(false);
-    setIsOwner(false);
-    setAdminEmail('');
-    setAdminRoleUser(null);
+    await authService.logout();
+    setAuthUser(null);
     setViewMode('game');
   };
 
@@ -1242,7 +1191,7 @@ export default function App() {
   );
 
   // Admin Dashboard Full Shell (code-split)
-  if (viewMode === 'admin' && isAdmin) {
+  if (viewMode === 'admin' && authUser) {
     return (
       <Suspense fallback={lazyViewFallback}>
         <AdminDashboard
@@ -1252,9 +1201,7 @@ export default function App() {
           settings={appSettings}
           scoringSettings={scoringSettings}
           competitionConfig={competitionConfig}
-          isOwner={isOwner}
-          adminEmail={adminEmail}
-          roleUser={adminRoleUser}
+          currentUser={authUser}
           onBackToApp={() => setViewMode('game')}
           onLogout={handleAdminLogout}
           playSound={playSound}
@@ -1269,7 +1216,7 @@ export default function App() {
         <StatisticsDashboard
           onBack={() => setViewMode('game')}
           isAdmin={isAdmin}
-          currentUserId={currentUser?.uid}
+          currentUserId={authUser?.id}
           playSound={playSound}
         />
       </Suspense>
@@ -1282,7 +1229,7 @@ export default function App() {
         <RecentCompetitions
           onBack={() => setViewMode('game')}
           isAdmin={isAdmin}
-          currentUserId={currentUser?.uid}
+          currentUserId={authUser?.id}
           playSound={playSound}
         />
       </Suspense>
@@ -1355,7 +1302,7 @@ export default function App() {
           }
         }}
         isAdmin={isAdmin}
-        adminEmail={adminEmail}
+        adminEmail={authUser ? `@${authUser.username}` : undefined}
         stageLabel={stageLabel}
       />
 
@@ -1535,7 +1482,6 @@ export default function App() {
         isOpen={showAuthModal}
         onClose={() => setShowAuthModal(false)}
         onSuccess={handleAdminAuthSuccess}
-        currentUser={currentUser}
         playSound={playSound}
       />
     </div>

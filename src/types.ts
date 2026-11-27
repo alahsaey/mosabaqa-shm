@@ -166,6 +166,8 @@ export type ApprovedSource = {
   createdAt?: any;
 };
 
+export type UserRole = 'super_admin' | 'admin' | 'operator';
+
 export type AdminPermissionKey =
   | 'manage_categories'
   | 'manage_questions'
@@ -175,7 +177,38 @@ export type AdminPermissionKey =
   | 'manage_scoring'
   | 'manage_settings'
   | 'view_reports'
-  | 'manage_security';
+  | 'manage_security'
+  | 'manage_users';
+
+export type SystemUser = {
+  id: string;
+  username: string;
+  fullName: string;
+  role: UserRole;
+  passwordSalt: string;
+  passwordHash: string;
+  passwordIterations: number;
+  permissions: Record<AdminPermissionKey, boolean>;
+  isActive: boolean;
+  isProtected?: boolean;
+  biometricEnabled: boolean;
+  credentialIds: string[];
+  createdAt?: string;
+  updatedAt?: string;
+  lastLoginAt?: string;
+  createdBy?: string;
+};
+
+export type AuthSessionUser = {
+  id: string;
+  username: string;
+  fullName: string;
+  role: UserRole;
+  permissions: Record<AdminPermissionKey, boolean>;
+  biometricEnabled: boolean;
+  authMethod: 'password' | 'webauthn';
+  isProtected?: boolean;
+};
 
 export type AdminRoleUser = {
   id: string;
@@ -191,6 +224,10 @@ export type AdminRoleUser = {
 export type AdminPasskeyRecord = {
   id: string;
   credentialId: string;
+  userId: string;
+  username: string;
+  fullName?: string;
+  role?: UserRole;
   publicKeyB64: string;
   counter: number;
   transports?: string[];
@@ -199,6 +236,7 @@ export type AdminPasskeyRecord = {
   userEmailMasked?: string;
   isActive: boolean;
   integrityHash: string;
+  verificationMode?: 'server' | 'client';
   createdAt?: any;
   lastUsedAt?: any;
 };
@@ -206,20 +244,25 @@ export type AdminPasskeyRecord = {
 export type SecurityLogEntry = {
   id?: string;
   eventType:
-    | 'google_login_success'
-    | 'google_login_blocked'
-    | 'google_login_failed'
+    | 'password_login_success'
+    | 'password_login_failed'
+    | 'password_login_blocked'
     | 'biometric_enrolled'
     | 'biometric_login_success'
     | 'biometric_login_failed'
     | 'biometric_revoked'
+    | 'user_created'
+    | 'user_updated'
+    | 'user_deleted'
+    | 'password_changed'
     | 'role_updated'
     | 'security_setting_changed'
     | 'admin_logout';
   email?: string;
+  username?: string;
   actorName?: string;
   deviceName?: string;
-  authMethod?: 'google' | 'webauthn' | 'system';
+  authMethod?: 'password' | 'webauthn' | 'system';
   result: 'success' | 'failed' | 'blocked';
   details?: string;
   createdAt?: any;

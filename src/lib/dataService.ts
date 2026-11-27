@@ -16,7 +16,7 @@ import {
   FirestoreError,
   onSnapshot,
 } from 'firebase/firestore';
-import { db, auth } from './firebase';
+import { db } from './firebase';
 import {
   ActiveQuestionTimerState,
   ActivityLogEntry,
@@ -62,22 +62,16 @@ const handleFirestoreError = (
   }
 
   if (error && (error as FirestoreError).code === 'permission-denied') {
-    const user = auth.currentUser;
     const errorInfo: FirestoreErrorInfo = {
       error: (error as Error).message,
       operationType,
       path,
       authInfo: {
-        userId: user?.uid || 'not-signed-in',
-        email: user?.email || '',
-        emailVerified: user?.emailVerified || false,
-        isAnonymous: user?.isAnonymous || false,
-        providerInfo:
-          user?.providerData.map((p) => ({
-            providerId: p.providerId,
-            displayName: p.displayName || '',
-            email: p.email || '',
-          })) || [],
+        userId: 'custom-session',
+        email: '',
+        emailVerified: false,
+        isAnonymous: false,
+        providerInfo: [],
       },
     };
     const finalErr = new Error(JSON.stringify(errorInfo));

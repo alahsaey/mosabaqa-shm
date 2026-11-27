@@ -17,21 +17,21 @@ import {
   LogOut,
   Menu,
   X,
-  AlertCircle,
   Film,
+  Fingerprint,
 } from 'lucide-react';
 import {
   ActivityLogEntry,
   AdminPermissionKey,
-  AdminRoleUser,
   ApprovedSource,
+  AuthSessionUser,
   Category,
   CompetitionConfig,
   ScoringSettings,
   VideoSourceRecord,
 } from '../types';
 import { dataService, DBAppSettings, DBGameSession, DBGroup } from '../lib/dataService';
-import { auth, signInWithGoogle } from '../lib/firebase';
+import { ROLE_LABELS } from '../services/authService';
 import { BRAND_ASSETS } from '../lib/assets';
 import { isValidCustomLogoUrl } from '../services/pwaBrandingService';
 import { AdminOverviewTab, AdminTabKey } from './admin/AdminOverviewTab';
@@ -53,9 +53,7 @@ interface AdminDashboardProps {
   settings: DBAppSettings;
   scoringSettings: ScoringSettings;
   competitionConfig: CompetitionConfig;
-  isOwner: boolean;
-  adminEmail: string;
-  roleUser: AdminRoleUser | null;
+  currentUser: AuthSessionUser;
   onBackToApp: () => void;
   onLogout: () => void;
   playSound?: (type: 'correct' | 'wrong' | 'victory' | 'intro' | 'click') => void;
@@ -79,7 +77,7 @@ const NAV_ITEMS: {
   { id: 'competition_config', label: 'إعدادات المسابقة', icon: Sliders, permission: 'manage_settings' },
   { id: 'reports', label: 'التقارير والإحصائيات', icon: BarChart3, permission: 'view_reports' },
   { id: 'activity_logs', label: 'سجل النشاطات', icon: Activity, permission: 'view_reports' },
-  { id: 'security', label: 'إدارة صلاحيات الدخول', icon: ShieldCheck, permission: 'manage_security' },
+  { id: 'security', label: 'المستخدمون والبصمة والأمان', icon: ShieldCheck },
   { id: 'general_settings', label: 'الإعدادات العامة', icon: Settings, permission: 'manage_settings' },
 ];
 
@@ -90,9 +88,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   settings,
   scoringSettings,
   competitionConfig,
-  isOwner,
-  adminEmail,
-  roleUser,
+  currentUser,
   onBackToApp,
   onLogout,
   playSound,
@@ -103,18 +99,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [activityLogs, setActivityLogs] = useState<ActivityLogEntry[]>([]);
   const [videoSources, setVideoSources] = useState<VideoSourceRecord[]>([]);
   const [selectedVideoQuestion, setSelectedVideoQuestion] = useState<{ catId: string; questionId: string } | null>(null);
-  const [googleConnected, setGoogleConnected] = useState(Boolean(auth.currentUser?.email));
+
+  const isSuperAdmin = currentUser.role === 'super_admin';
+  const actorIdentity = `@${currentUser.username}`;
 
   useEffect(() => {
     const u1 = dataService.subscribeGameSessions(true, undefined, setSessions);
     const u2 = dataService.subscribeActivityLogs(setActivityLogs);
-    const u3 = auth.onAuthStateChanged((u) => setGoogleConnected(Boolean(u?.email)));
-    const u4 = dataService.subscribeVideoSources(setVideoSources);
+    const u3 = dataService.subscribeVideoSources(setVideoSources);
     return () => {
       u1();
       u2();
       u3();
-      u4();
     };
   }, []);
 
@@ -124,12 +120,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   };
 
   const visibleNav = useMemo(() => {
-    if (isOwner) return NAV_ITEMS;
+    if (isSuperAdmin) return NAV_ITEMS;
     return NAV_ITEMS.filter((item) => {
       if (!item.permission) return true;
-      return Boolean(roleUser?.permissions?.[item.permission]);
+      return Boolean(currentUser.permissions?.[item.permission]);
     });
-  }, [isOwner, roleUser]);
+  }, [isSuperAdmin, currentUser.permissions]);
 
   const pendingReviewCount = useMemo(
     () =>
@@ -141,12 +137,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   );
 
   const activeNavMeta = NAV_ITEMS.find((n) => n.id === activeTab) || NAV_ITEMS[0];
-
-  const handleConnectGoogleForWrites = async () => {
-    try {
-      await signInWithGoogle();
-    } catch {}
-  };
 
   return (
     <div className="min-h-screen bg-[#FAF7F2] text-[#0F172A] flex flex-col lg:flex-row" dir="rtl">
@@ -228,8 +218,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         </nav>
 
         <div className="p-4 border-t border-white/10 space-y-2 text-xs">
-          <div className="px-2 py-1.5 rounded-lg bg-[#13253E] text-slate-300 font-mono truncate">
-            {adminEmail}
+          <div className="px-3 py-2 rounded-xl bg-[#13253E] border border-white/10">
+            <div className="font-bold text-white truncate">{currentUser.fullName}</div>
+            <div className="flex items-center justify-between text-[11px] text-slate-300 mt-0.5">
+              <span className="font-mono truncate">@{currentUser.username}</span>
+              <span className="text-[#D9B768] font-bold shrink-0">{ROLE_LABELS[currentUser.role]}</span>
+            </div>
           </div>
           <div className="grid grid-cols-2 gap-2">
             <button
@@ -266,7 +260,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             </button>
             <div>
               <div className="text-[11px] font-bold text-[#9B7729]">
-                لوحة التحكم • {isOwner ? 'صلاحية المالك الكاملة' : 'مشرف مفوض'}
+                لوحة التحكم • {ROLE_LABELS[currentUser.role]}
               </div>
               <h1 className="font-display font-extrabold text-base sm:text-lg text-[#0B192C]">
                 {activeNavMeta.label}
@@ -275,14 +269,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           </div>
 
           <div className="flex items-center gap-2">
-            {!googleConnected && (
+            {!currentUser.biometricEnabled && activeTab !== 'security' && (
               <button
                 type="button"
-                onClick={handleConnectGoogleForWrites}
-                className="px-3.5 py-2 rounded-xl bg-[#F7F1DF] border border-[#C9A24D] text-[#0B192C] text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                onClick={() => {
+                  playSound?.('click');
+                  setActiveTab('security');
+                }}
+                className="hidden md:inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#FAF7F2] hover:bg-[#F3EFE6] border border-[#C9A24D]/50 text-[#0B192C] text-xs font-bold cursor-pointer"
               >
-                <AlertCircle className="w-4 h-4 text-[#9B7729]" />
-                <span>تأكيد جلسة Google للحفظ السحابي</span>
+                <Fingerprint className="w-4 h-4 text-[#9B7729]" />
+                <span>تفعيل الدخول بالبصمة</span>
               </button>
             )}
             <button
@@ -309,7 +306,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           )}
 
           {activeTab === 'competitions' && (
-            <AdminCompetitionsTab sessions={sessions} actorEmail={adminEmail} />
+            <AdminCompetitionsTab sessions={sessions} actorEmail={actorIdentity} />
           )}
 
           {activeTab === 'categories' && (
@@ -317,7 +314,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               categories={categories}
               groups={groups}
               sources={sources}
-              actorEmail={adminEmail}
+              actorEmail={actorIdentity}
             />
           )}
 
@@ -326,7 +323,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               categories={categories}
               sources={sources}
               scoringSettings={scoringSettings}
-              actorEmail={adminEmail}
+              actorEmail={actorIdentity}
               onOpenVideoStudio={openVideoStudioForQuestion}
             />
           )}
@@ -337,7 +334,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               sources={sources}
               videoSources={videoSources}
               scoringSettings={scoringSettings}
-              actorEmail={adminEmail}
+              actorEmail={actorIdentity}
               initialQuestionSelection={selectedVideoQuestion}
             />
           )}
@@ -348,20 +345,20 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               sources={sources}
               scoringSettings={scoringSettings}
               competitionConfig={competitionConfig}
-              actorEmail={adminEmail}
+              actorEmail={actorIdentity}
             />
           )}
 
           {activeTab === 'review_queue' && (
             <AdminReviewQueueTab
               categories={categories}
-              actorEmail={adminEmail}
+              actorEmail={actorIdentity}
               onOpenVideoStudio={openVideoStudioForQuestion}
             />
           )}
 
           {activeTab === 'sources' && (
-            <AdminSourcesTab sources={sources} categories={categories} actorEmail={adminEmail} />
+            <AdminSourcesTab sources={sources} categories={categories} actorEmail={actorIdentity} />
           )}
 
           {(activeTab === 'scoring' || activeTab === 'competition_config') && (
@@ -369,7 +366,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               mode={activeTab}
               scoringSettings={scoringSettings}
               competitionConfig={competitionConfig}
-              actorEmail={adminEmail}
+              actorEmail={actorIdentity}
             />
           )}
 
@@ -380,12 +377,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               sessions={sessions}
               activityLogs={activityLogs}
               settings={settings}
-              actorEmail={adminEmail}
+              actorEmail={actorIdentity}
             />
           )}
 
           {activeTab === 'security' && (
-            <AdminSecurityTab isOwner={isOwner} actorEmail={adminEmail} playSound={playSound} />
+            <AdminSecurityTab currentUser={currentUser} playSound={playSound} />
           )}
         </main>
       </div>

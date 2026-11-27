@@ -13,8 +13,6 @@ import * as cheerio from "cheerio";
 import dotenv from "dotenv";
 import { EventEmitter } from "events";
 import { GoogleGenAI, ThinkingLevel, Type } from "@google/genai";
-import { initializeApp as initializeAdminApp, getApps as getAdminApps } from "firebase-admin/app";
-import { getAuth as getAdminAuth } from "firebase-admin/auth";
 import {
   generateRegistrationOptions,
   verifyRegistrationResponse,
@@ -28,14 +26,6 @@ process.setMaxListeners(50);
 
 dotenv.config();
 
-const OWNER_EMAIL = "alahsaey@gmail.com";
-
-if (getAdminApps().length === 0) {
-  initializeAdminApp({
-    projectId: firebaseConfig.projectId,
-  });
-}
-
 // Strong secret for short-lived WebAuthn challenges and admin session tokens
 const SESSION_HMAC_KEY =
   process.env.SESSION_SECRET || crypto.randomBytes(32).toString("hex");
@@ -48,10 +38,11 @@ const PASSKEY_SEAL_KEY =
     .update(`abf-server-hmac:${firebaseConfig.projectId}:${firebaseConfig.appId}`)
     .digest("hex");
 
-// In-memory replay guard, token revocation registry, and hint rate-limit buckets
+// In-memory replay guard, token revocation registry, and rate-limit buckets
 const usedChallengeNonces = new Map<string, number>();
 const revokedSessionJtis = new Map<string, number>();
 const hintRateBuckets = new Map<string, { count: number; resetAt: number }>();
+const loginRateBuckets = new Map<string, { count: number; resetAt: number }>();
 
 setInterval(() => {
   const now = Date.now();
@@ -63,6 +54,9 @@ setInterval(() => {
   }
   for (const [k, bucket] of hintRateBuckets.entries()) {
     if (bucket.resetAt < now) hintRateBuckets.delete(k);
+  }
+  for (const [k, bucket] of loginRateBuckets.entries()) {
+    if (bucket.resetAt < now) loginRateBuckets.delete(k);
   }
 }, 5 * 60 * 1000).unref();
 
@@ -98,14 +92,137 @@ function verifySignedToken<T = any>(token: string): T | null {
   }
 }
 
+const SUPER_ADMIN_USERNAME = "alahsaey";
+const SUPER_ADMIN_USER_ID = "user_alahsaey";
+const DEFAULT_SUPER_ADMIN_SALT = "abf_v2_sa_9f4e2c7a1b8d603e5a2f9c4b1e7d3a8c";
+const DEFAULT_SUPER_ADMIN_HASH = "73d7d1280fd05049bf8c65687f80ae03b5b37bc2e4c5fe96ffb2e4f9e6a1586c";
+const DEFAULT_PBKDF2_ITERATIONS = 120000;
+const SERVER_USERS_FILE = path.join(process.cwd(), ".cache", "system-users.json");
+
+interface ServerSystemUser {
+  id: string;
+  username: string;
+  fullName: string;
+  role: "super_admin" | "admin" | "operator";
+  passwordSalt: string;
+  passwordHash: string;
+  passwordIterations: number;
+  isActive: boolean;
+  isProtected: boolean;
+  createdAt: string;
+  updatedAt?: string;
+}
+
+function createServerDefaultSuperAdmin(): ServerSystemUser {
+  return {
+    id: SUPER_ADMIN_USER_ID,
+    username: SUPER_ADMIN_USERNAME,
+    fullName: "الدعم الفني والإدارة العامة",
+    role: "super_admin",
+    passwordSalt: DEFAULT_SUPER_ADMIN_SALT,
+    passwordHash: DEFAULT_SUPER_ADMIN_HASH,
+    passwordIterations: DEFAULT_PBKDF2_ITERATIONS,
+    isActive: true,
+    isProtected: true,
+    createdAt: "2026-01-01T00:00:00.000Z",
+  };
+}
+
+function hashPasswordServer(password: string): { salt: string; hash: string; iterations: number } {
+  const salt = crypto.randomBytes(16).toString("hex");
+  const hash = crypto
+    .pbkdf2Sync(password, salt, DEFAULT_PBKDF2_ITERATIONS, 32, "sha256")
+    .toString("hex");
+  return { salt, hash, iterations: DEFAULT_PBKDF2_ITERATIONS };
+}
+
+function verifyPbkdf2Password(
+  password: string,
+  salt: string,
+  expectedHashHex: string,
+  iterations = DEFAULT_PBKDF2_ITERATIONS
+): boolean {
+  try {
+    const safeIter = Math.min(300000, Math.max(10000, Number(iterations) || DEFAULT_PBKDF2_ITERATIONS));
+    const derived = crypto.pbkdf2Sync(password, salt, safeIter, 32, "sha256").toString("hex");
+    return safeTimingEqual(derived, expectedHashHex);
+  } catch {
+    return false;
+  }
+}
+
+function ensureServerSuperAdmin(users: ServerSystemUser[]): ServerSystemUser[] {
+  const defaultSA = createServerDefaultSuperAdmin();
+  const idx = users.findIndex(
+    (u) => u.username.toLowerCase() === SUPER_ADMIN_USERNAME || u.id === SUPER_ADMIN_USER_ID
+  );
+  if (idx === -1) return [defaultSA, ...users];
+  const existing = users[idx];
+  const next = [...users];
+  next[idx] = {
+    ...defaultSA,
+    ...existing,
+    id: SUPER_ADMIN_USER_ID,
+    username: SUPER_ADMIN_USERNAME,
+    role: "super_admin",
+    isActive: true,
+    isProtected: true,
+    passwordSalt: existing.passwordSalt || defaultSA.passwordSalt,
+    passwordHash: existing.passwordHash || defaultSA.passwordHash,
+    passwordIterations: existing.passwordIterations || DEFAULT_PBKDF2_ITERATIONS,
+  };
+  return next;
+}
+
+function loadServerUsers(): ServerSystemUser[] {
+  try {
+    if (fs.existsSync(SERVER_USERS_FILE)) {
+      const parsed = JSON.parse(fs.readFileSync(SERVER_USERS_FILE, "utf8"));
+      if (Array.isArray(parsed)) {
+        return ensureServerSuperAdmin(parsed);
+      }
+    }
+  } catch (err) {
+    console.warn("[AUTH] Failed to read server user store, resetting to default super_admin:", err);
+  }
+  const initial = [createServerDefaultSuperAdmin()];
+  saveServerUsers(initial);
+  return initial;
+}
+
+function saveServerUsers(users: ServerSystemUser[]): ServerSystemUser[] {
+  const safe = ensureServerSuperAdmin(users);
+  try {
+    const dir = path.dirname(SERVER_USERS_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(SERVER_USERS_FILE, JSON.stringify(safe, null, 2), { mode: 0o600 });
+  } catch (err) {
+    console.error("[AUTH] Failed to persist server user store:", err);
+  }
+  return safe;
+}
+
+function toPublicServerUser(u: ServerSystemUser) {
+  return {
+    id: u.id,
+    username: u.username,
+    fullName: u.fullName,
+    role: u.role,
+    isActive: u.isActive,
+    isProtected: u.isProtected,
+    createdAt: u.createdAt,
+    updatedAt: u.updatedAt,
+  };
+}
+
 function computePasskeyIntegrity(input: {
   credentialId: string;
   publicKeyB64: string;
   rpId: string;
-  userEmail: string;
+  username: string;
 }): string {
   return hmacSign(
-    `passkey:v1:${input.credentialId}:${input.publicKeyB64}:${input.rpId}:${input.userEmail.toLowerCase()}`,
+    `passkey:v2:${input.credentialId}:${input.publicKeyB64}:${input.rpId}:${input.username.toLowerCase()}`,
     PASSKEY_SEAL_KEY
   );
 }
@@ -131,31 +248,6 @@ function resolveOriginAndRpId(req: express.Request): { origin: string; rpId: str
   const rpId = hostClean.split(":")[0];
   const proto = ((req.headers["x-forwarded-proto"] as string) || req.protocol || "http").split(",")[0].trim();
   return { origin: `${proto}://${hostClean}`, rpId };
-}
-
-async function verifyFirebaseIdTokenFromRequest(
-  req: express.Request
-): Promise<{ uid: string; email: string; emailVerified: boolean; name?: string } | null> {
-  const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith("Bearer ")) return null;
-  const token = authHeader.slice(7).trim();
-  if (!token) return null;
-
-  try {
-    const decoded = await getAdminAuth().verifyIdToken(token);
-    if (!decoded.email || decoded.email_verified !== true) {
-      return null;
-    }
-    return {
-      uid: decoded.uid,
-      email: decoded.email.toLowerCase(),
-      emailVerified: !!decoded.email_verified,
-      name: decoded.name,
-    };
-  } catch (err: any) {
-    console.warn("[AUTH] Firebase ID token verification failed:", err?.message || err);
-    return null;
-  }
 }
 
 function isBlockedPrivateIp(ip: string): boolean {
@@ -230,23 +322,25 @@ async function assertSafePublicUrl(rawUrl: string): Promise<{ ok: boolean; url?:
   return { ok: true, url: parsedUrl };
 }
 
+function requireSuperAdmin(
+  req: express.Request,
+  res: express.Response,
+  next: express.NextFunction
+) {
+  const adminUser = (req as any).adminUser;
+  if (!adminUser || (adminUser.role !== "super_admin" && adminUser.username !== SUPER_ADMIN_USERNAME)) {
+    return res.status(403).json({
+      error: "هذه العملية محصورة بحساب الدعم الفني / المدير العام (super_admin) فقط.",
+    });
+  }
+  return next();
+}
+
 async function requireAdminAuth(
   req: express.Request,
   res: express.Response,
   next: express.NextFunction
 ) {
-  // 1. Check Firebase Google Auth ID Token (Authorization: Bearer <idToken>)
-  const firebaseUser = await verifyFirebaseIdTokenFromRequest(req);
-  if (firebaseUser) {
-    (req as any).adminUser = {
-      email: firebaseUser.email,
-      isOwner: firebaseUser.email === OWNER_EMAIL,
-      authMethod: "google",
-    };
-    return next();
-  }
-
-  // 2. Check server-issued WebAuthn Admin Session Token (X-Admin-Session or Bearer fallback)
   const headerSessionToken =
     (typeof req.headers["x-admin-session"] === "string" ? req.headers["x-admin-session"].trim() : "") ||
     (typeof req.headers.authorization === "string" && req.headers.authorization.startsWith("Bearer ")
@@ -256,17 +350,32 @@ async function requireAdminAuth(
   if (headerSessionToken) {
     const payload = verifySignedToken<{
       jti: string;
-      email: string;
+      userId: string;
+      username: string;
+      fullName?: string;
       role: string;
       authMethod: string;
       exp: number;
     }>(headerSessionToken);
 
     if (payload && !revokedSessionJtis.has(payload.jti)) {
+      const uname = (payload.username || "").toLowerCase();
+      const serverUsers = loadServerUsers();
+      const liveUser = serverUsers.find((u) => u.username.toLowerCase() === uname);
+      if (liveUser && !liveUser.isActive) {
+        return res.status(403).json({
+          error: "تم تعطيل هذا الحساب من قبل الإدارة.",
+        });
+      }
+
+      const effectiveRole = liveUser?.role || payload.role || "operator";
       (req as any).adminUser = {
-        email: payload.email,
-        isOwner: payload.email?.toLowerCase() === OWNER_EMAIL,
-        authMethod: payload.authMethod || "webauthn",
+        userId: liveUser?.id || payload.userId || `user_${uname}`,
+        username: uname,
+        fullName: liveUser?.fullName || payload.fullName || uname,
+        role: effectiveRole,
+        isOwner: effectiveRole === "super_admin" || uname === SUPER_ADMIN_USERNAME,
+        authMethod: payload.authMethod || "password",
       };
       return next();
     }
@@ -934,26 +1043,295 @@ async function startServer() {
   });
 
   // =========================================================================
-  // AUTH & SERVER-VERIFIED WEBAUTHN PASSKEYS
+  // CUSTOM USERNAME/PASSWORD AUTH & SERVER-VERIFIED WEBAUTHN PASSKEYS
   // =========================================================================
 
-  app.post("/api/auth/session/verify", async (req, res) => {
-    const firebaseUser = await verifyFirebaseIdTokenFromRequest(req);
-    if (firebaseUser) {
+  app.post("/api/auth/login", (req, res) => {
+    try {
+      const rawUsername = typeof req.body?.username === "string" ? req.body.username.trim().toLowerCase() : "";
+      const password = typeof req.body?.password === "string" ? req.body.password : "";
+
+      if (!rawUsername || !password) {
+        return res.status(400).json({ error: "يرجى إدخال اسم المستخدم وكلمة المرور." });
+      }
+
+      // Per-IP + username login attempt rate limiting (15 failed tries / 15 min)
+      const clientIp =
+        String(req.headers["x-forwarded-for"] || "")
+          .split(",")[0]
+          .trim() ||
+        req.socket.remoteAddress ||
+        "unknown";
+      const rateKey = `${clientIp}:${rawUsername}`;
+      const now = Date.now();
+      const bucket = loginRateBuckets.get(rateKey);
+      if (bucket && bucket.resetAt > now && bucket.count >= 15) {
+        return res.status(429).json({
+          error: "تم تجاوز الحد المسموح لمحاولات تسجيل الدخول. يرجى الانتظار قليلاً ثم المحاولة مجدداً.",
+        });
+      }
+
+      const recordFailure = () => {
+        const cur = loginRateBuckets.get(rateKey);
+        if (!cur || cur.resetAt <= now) {
+          loginRateBuckets.set(rateKey, { count: 1, resetAt: now + 15 * 60 * 1000 });
+        } else {
+          cur.count += 1;
+        }
+      };
+
+      // Strictly verify against server-authoritative user registry (never trust client-supplied hashes/roles)
+      const serverUsers = loadServerUsers();
+      const matched = serverUsers.find((u) => u.username.toLowerCase() === rawUsername);
+
+      if (!matched) {
+        recordFailure();
+        return res.status(401).json({ error: "اسم المستخدم أو كلمة المرور غير صحيحة." });
+      }
+
+      if (!matched.isActive) {
+        return res.status(403).json({
+          error: "تم تعطيل هذا الحساب من قبل الإدارة. تواصل مع الدعم الفني.",
+        });
+      }
+
+      let valid = false;
+      if (matched.username === SUPER_ADMIN_USERNAME) {
+        const envOverride = (process.env.SUPER_ADMIN_PASSWORD || "").trim();
+        if (envOverride) {
+          valid = safeTimingEqual(password, envOverride);
+        } else {
+          valid = verifyPbkdf2Password(
+            password,
+            matched.passwordSalt,
+            matched.passwordHash,
+            matched.passwordIterations
+          );
+        }
+      } else {
+        valid = verifyPbkdf2Password(
+          password,
+          matched.passwordSalt,
+          matched.passwordHash,
+          matched.passwordIterations
+        );
+      }
+
+      if (!valid) {
+        recordFailure();
+        return res.status(401).json({ error: "اسم المستخدم أو كلمة المرور غير صحيحة." });
+      }
+
+      loginRateBuckets.delete(rateKey);
+
+      const jti = crypto.randomBytes(16).toString("hex");
+      const exp = Date.now() + 12 * 3600 * 1000;
+      const adminSessionToken = signToken({
+        jti,
+        userId: matched.id,
+        username: matched.username,
+        fullName: matched.fullName,
+        role: matched.role,
+        authMethod: "password",
+        exp,
+      });
+
       return res.json({
         authenticated: true,
-        authMethod: "google",
-        email: firebaseUser.email,
-        uid: firebaseUser.uid,
-        isOwner: firebaseUser.email === OWNER_EMAIL,
+        userId: matched.id,
+        username: matched.username,
+        fullName: matched.fullName,
+        role: matched.role,
+        adminSessionToken,
+        expiresAt: exp,
       });
+    } catch (err: any) {
+      console.error("[AUTH] login error:", err);
+      return res.status(500).json({ error: "تعذر إتمام تسجيل الدخول حالياً." });
     }
+  });
 
-    const sessionToken = typeof req.body?.adminSessionToken === "string" ? req.body.adminSessionToken : "";
+  // Server-authoritative Users Management API (strictly protected by super_admin)
+  app.get("/api/auth/users", requireAdminAuth, requireSuperAdmin, (_req, res) => {
+    const users = loadServerUsers().map(toPublicServerUser);
+    res.json({ users });
+  });
+
+  app.post("/api/auth/users", requireAdminAuth, requireSuperAdmin, (req, res) => {
+    try {
+      const fullName = typeof req.body?.fullName === "string" ? req.body.fullName.trim() : "";
+      const username = typeof req.body?.username === "string" ? req.body.username.trim().toLowerCase() : "";
+      const password = typeof req.body?.password === "string" ? req.body.password : "";
+      const role: "admin" | "operator" = req.body?.role === "admin" ? "admin" : "operator";
+      const requestedId = typeof req.body?.id === "string" && req.body.id.trim() ? req.body.id.trim() : "";
+
+      if (fullName.length < 2) {
+        return res.status(400).json({ error: "يرجى إدخال الاسم الكامل للمستخدم." });
+      }
+      if (!/^[a-z0-9._-]{3,32}$/.test(username)) {
+        return res.status(400).json({ error: "صيغة اسم المستخدم غير صالحة." });
+      }
+      if (password.length < 6) {
+        return res.status(400).json({ error: "كلمة المرور يجب أن تكون 6 أحرف على الأقل." });
+      }
+
+      const users = loadServerUsers();
+      if (users.some((u) => u.username.toLowerCase() === username)) {
+        return res.status(409).json({ error: "اسم المستخدم مستخدم بالفعل." });
+      }
+
+      const hashed = hashPasswordServer(password);
+      const nowIso = new Date().toISOString();
+      const newUser: ServerSystemUser = {
+        id: requestedId || `user_${Date.now()}_${crypto.randomBytes(3).toString("hex")}`,
+        username,
+        fullName,
+        role,
+        passwordSalt: hashed.salt,
+        passwordHash: hashed.hash,
+        passwordIterations: hashed.iterations,
+        isActive: true,
+        isProtected: false,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      };
+
+      saveServerUsers([...users, newUser]);
+      return res.status(201).json({ user: toPublicServerUser(newUser) });
+    } catch (err: any) {
+      console.error("[AUTH] create user error:", err);
+      return res.status(500).json({ error: "تعذر إنشاء المستخدم." });
+    }
+  });
+
+  app.patch("/api/auth/users/:id", requireAdminAuth, requireSuperAdmin, (req, res) => {
+    try {
+      const targetId = String(req.params.id || "").trim();
+      const users = loadServerUsers();
+      const target = users.find((u) => u.id === targetId);
+      if (!target) {
+        return res.status(404).json({ error: "المستخدم غير موجود." });
+      }
+
+      const isProtected = target.isProtected || target.username === SUPER_ADMIN_USERNAME;
+      if (isProtected) {
+        if (req.body?.isActive === false) {
+          return res.status(403).json({ error: "لا يمكن تعطيل حساب الدعم الفني الأساسي." });
+        }
+        if (req.body?.role && req.body.role !== "super_admin") {
+          return res.status(403).json({ error: "لا يمكن تغيير صلاحية حساب الدعم الفني الأساسي." });
+        }
+      }
+
+      const nextRole: ServerSystemUser["role"] = isProtected
+        ? "super_admin"
+        : req.body?.role === "admin"
+          ? "admin"
+          : req.body?.role === "operator"
+            ? "operator"
+            : target.role;
+
+      const updated = users.map((u) =>
+        u.id === targetId
+          ? {
+              ...u,
+              fullName:
+                typeof req.body?.fullName === "string" && req.body.fullName.trim().length >= 2
+                  ? req.body.fullName.trim()
+                  : u.fullName,
+              role: nextRole,
+              isActive: isProtected
+                ? true
+                : typeof req.body?.isActive === "boolean"
+                  ? req.body.isActive
+                  : u.isActive,
+              updatedAt: new Date().toISOString(),
+            }
+          : u
+      );
+
+      saveServerUsers(updated);
+      const saved = updated.find((u) => u.id === targetId)!;
+      return res.json({ user: toPublicServerUser(saved) });
+    } catch (err: any) {
+      console.error("[AUTH] update user error:", err);
+      return res.status(500).json({ error: "تعذر تحديث بيانات المستخدم." });
+    }
+  });
+
+  app.patch("/api/auth/users/:id/password", requireAdminAuth, (req, res) => {
+    try {
+      const targetId = String(req.params.id || "").trim();
+      const actor = (req as any).adminUser;
+      const isActorSuperAdmin = actor.role === "super_admin" || actor.username === SUPER_ADMIN_USERNAME;
+
+      if (!isActorSuperAdmin && actor.userId !== targetId) {
+        return res.status(403).json({ error: "لا تملك صلاحية تغيير كلمة مرور هذا الحساب." });
+      }
+
+      const newPassword = typeof req.body?.password === "string" ? req.body.password : "";
+      if (newPassword.length < 6) {
+        return res.status(400).json({ error: "كلمة المرور الجديدة يجب أن تكون 6 أحرف على الأقل." });
+      }
+
+      const users = loadServerUsers();
+      const target = users.find((u) => u.id === targetId);
+      if (!target) {
+        return res.status(404).json({ error: "المستخدم غير موجود." });
+      }
+
+      const hashed = hashPasswordServer(newPassword);
+      const updated = users.map((u) =>
+        u.id === targetId
+          ? {
+              ...u,
+              passwordSalt: hashed.salt,
+              passwordHash: hashed.hash,
+              passwordIterations: hashed.iterations,
+              updatedAt: new Date().toISOString(),
+            }
+          : u
+      );
+
+      saveServerUsers(updated);
+      return res.json({ success: true });
+    } catch (err: any) {
+      console.error("[AUTH] change password error:", err);
+      return res.status(500).json({ error: "تعذر تحديث كلمة المرور." });
+    }
+  });
+
+  app.delete("/api/auth/users/:id", requireAdminAuth, requireSuperAdmin, (req, res) => {
+    try {
+      const targetId = String(req.params.id || "").trim();
+      const users = loadServerUsers();
+      const target = users.find((u) => u.id === targetId);
+      if (!target) {
+        return res.status(404).json({ error: "المستخدم غير موجود." });
+      }
+      if (target.isProtected || target.username === SUPER_ADMIN_USERNAME) {
+        return res.status(403).json({ error: "حساب الدعم الفني الرئيسي محمي ولا يمكن حذفه." });
+      }
+
+      saveServerUsers(users.filter((u) => u.id !== targetId));
+      return res.json({ success: true });
+    } catch (err: any) {
+      console.error("[AUTH] delete user error:", err);
+      return res.status(500).json({ error: "تعذر حذف المستخدم." });
+    }
+  });
+
+  app.post("/api/auth/session/verify", (req, res) => {
+    const sessionToken =
+      (typeof req.body?.adminSessionToken === "string" ? req.body.adminSessionToken : "") ||
+      (typeof req.headers["x-admin-session"] === "string" ? req.headers["x-admin-session"].trim() : "");
+
     if (sessionToken) {
       const payload = verifySignedToken<{
         jti: string;
-        email: string;
+        userId: string;
+        username: string;
+        fullName?: string;
         role: string;
         authMethod: string;
         exp: number;
@@ -962,9 +1340,11 @@ async function startServer() {
       if (payload && !revokedSessionJtis.has(payload.jti)) {
         return res.json({
           authenticated: true,
-          authMethod: payload.authMethod || "webauthn",
-          email: payload.email,
-          isOwner: payload.email.toLowerCase() === OWNER_EMAIL,
+          authMethod: payload.authMethod || "password",
+          userId: payload.userId,
+          username: payload.username,
+          fullName: payload.fullName || payload.username,
+          isOwner: payload.role === "super_admin" || payload.username === SUPER_ADMIN_USERNAME,
           role: payload.role,
           expiresAt: payload.exp,
         });
@@ -985,20 +1365,14 @@ async function startServer() {
     res.json({ success: true });
   });
 
-  app.post("/api/auth/webauthn/register-options", async (req, res) => {
+  app.post("/api/auth/webauthn/register-options", requireAdminAuth, async (req, res) => {
     try {
-      const firebaseUser = await verifyFirebaseIdTokenFromRequest(req);
-      if (!firebaseUser) {
-        return res.status(401).json({
-          error: "يجب تسجيل الدخول بحساب Google المعتمد وتأكيد البريد الإلكتروني قبل تفعيل البصمة على هذا الجهاز.",
-        });
-      }
-
-      if (firebaseUser.email !== OWNER_EMAIL) {
-        return res.status(403).json({
-          error: `تفعيل بصمة المالك محصور بالحساب المعتمد (${OWNER_EMAIL}).`,
-        });
-      }
+      const adminUser = (req as any).adminUser as {
+        userId: string;
+        username: string;
+        fullName: string;
+        role: string;
+      };
 
       const { origin, rpId } = resolveOriginAndRpId(req);
       const excludeIds: string[] = Array.isArray(req.body?.excludeCredentialIds)
@@ -1008,8 +1382,8 @@ async function startServer() {
       const options = await generateRegistrationOptions({
         rpName: "مسابقة ابوالفواطم",
         rpID: rpId,
-        userName: firebaseUser.email,
-        userDisplayName: firebaseUser.name || "مسؤول مسابقة ابوالفواطم",
+        userName: adminUser.username,
+        userDisplayName: adminUser.fullName || adminUser.username,
         attestationType: "none",
         excludeCredentials: excludeIds.map((id) => ({ id })),
         authenticatorSelection: {
@@ -1026,8 +1400,10 @@ async function startServer() {
         challenge: options.challenge,
         rpId,
         origin,
-        uid: firebaseUser.uid,
-        email: firebaseUser.email,
+        userId: adminUser.userId,
+        username: adminUser.username,
+        fullName: adminUser.fullName,
+        role: adminUser.role,
         nonce,
         exp: Date.now() + 3 * 60 * 1000,
       });
@@ -1039,12 +1415,14 @@ async function startServer() {
     }
   });
 
-  app.post("/api/auth/webauthn/register-verify", async (req, res) => {
+  app.post("/api/auth/webauthn/register-verify", requireAdminAuth, async (req, res) => {
     try {
-      const firebaseUser = await verifyFirebaseIdTokenFromRequest(req);
-      if (!firebaseUser || firebaseUser.email !== OWNER_EMAIL) {
-        return res.status(403).json({ error: "غير مصرح بتسجيل جهاز جديد." });
-      }
+      const adminUser = (req as any).adminUser as {
+        userId: string;
+        username: string;
+        fullName: string;
+        role: string;
+      };
 
       const { registrationResponse, challengeToken, deviceName } = req.body || {};
       if (!registrationResponse || typeof challengeToken !== "string") {
@@ -1056,8 +1434,10 @@ async function startServer() {
         challenge: string;
         rpId: string;
         origin: string;
-        uid: string;
-        email: string;
+        userId: string;
+        username: string;
+        fullName: string;
+        role: string;
         nonce: string;
         exp: number;
       }>(challengeToken);
@@ -1065,7 +1445,7 @@ async function startServer() {
       if (
         !challengePayload ||
         challengePayload.type !== "webauthn_reg" ||
-        challengePayload.email !== firebaseUser.email ||
+        challengePayload.username !== adminUser.username ||
         usedChallengeNonces.has(challengePayload.nonce)
       ) {
         return res.status(400).json({ error: "انتهت صلاحية التحدي الأمني أو استُخدم مسبقاً. أعد المحاولة." });
@@ -1091,21 +1471,22 @@ async function startServer() {
         credentialId: credential.id,
         publicKeyB64,
         rpId: challengePayload.rpId,
-        userEmail: firebaseUser.email,
+        username: adminUser.username,
       });
-
-      const maskedEmail = firebaseUser.email.replace(/^(.{2,3})(.*)(@.*)$/, "$1***$3");
 
       return res.json({
         verified: true,
         passkey: {
           credentialId: credential.id,
+          userId: adminUser.userId,
+          username: adminUser.username,
+          fullName: adminUser.fullName,
+          role: adminUser.role,
           publicKeyB64,
           counter: credential.counter,
           transports: credential.transports || [],
           rpId: challengePayload.rpId,
           deviceName: typeof deviceName === "string" && deviceName.trim() ? deviceName.trim() : "جهاز معتمد بالبصمة",
-          userEmailMasked: maskedEmail,
           isActive: true,
           integrityHash,
         },
@@ -1175,12 +1556,16 @@ async function startServer() {
         return res.status(403).json({ error: "تم تعطيل هذا الجهاز من قائمة الأجهزة الموثوقة." });
       }
 
-      // Verify server-issued HMAC seal so public key / email cannot be spoofed client-side
+      const boundUsername = typeof passkeyRecord.username === "string" ? passkeyRecord.username.toLowerCase() : "";
+      if (!boundUsername) {
+        return res.status(400).json({ error: "سجل البصمة غير مرتبط باسم مستخدم صالح." });
+      }
+
       const expectedSeal = computePasskeyIntegrity({
         credentialId: passkeyRecord.credentialId,
         publicKeyB64: passkeyRecord.publicKeyB64,
         rpId: passkeyRecord.rpId || challengePayload.rpId,
-        userEmail: OWNER_EMAIL,
+        username: boundUsername,
       });
 
       if (!passkeyRecord.integrityHash || !safeTimingEqual(passkeyRecord.integrityHash, expectedSeal)) {
@@ -1205,12 +1590,24 @@ async function startServer() {
         return res.status(401).json({ error: "فشلت مطابقة التوقيع التشفيري لبصمة الجهاز." });
       }
 
+      // Confirm user status and authoritative role from server user registry
+      const serverUsers = loadServerUsers();
+      const matchedServerUser = serverUsers.find((u) => u.username.toLowerCase() === boundUsername);
+      if (!matchedServerUser) {
+        return res.status(403).json({ error: "الحساب المرتبط بهذه البصمة لم يعد موجوداً في النظام." });
+      }
+      if (!matchedServerUser.isActive) {
+        return res.status(403).json({ error: "تم تعطيل هذا الحساب من قبل الإدارة." });
+      }
+
       const jti = crypto.randomBytes(16).toString("hex");
       const exp = Date.now() + 12 * 3600 * 1000;
       const adminSessionToken = signToken({
         jti,
-        email: OWNER_EMAIL,
-        role: "owner",
+        userId: matchedServerUser.id,
+        username: matchedServerUser.username,
+        fullName: matchedServerUser.fullName,
+        role: matchedServerUser.role,
         authMethod: "webauthn",
         credentialId: passkeyRecord.credentialId,
         exp,
@@ -1218,8 +1615,10 @@ async function startServer() {
 
       return res.json({
         verified: true,
-        email: OWNER_EMAIL,
-        role: "owner",
+        userId: matchedServerUser.id,
+        username: matchedServerUser.username,
+        fullName: matchedServerUser.fullName,
+        role: matchedServerUser.role,
         newCounter: verification.authenticationInfo.newCounter,
         adminSessionToken,
         expiresAt: exp,

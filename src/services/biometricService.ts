@@ -4,12 +4,15 @@ import {
   startAuthentication,
   startRegistration,
 } from '@simplewebauthn/browser';
-import { auth } from '../lib/firebase';
 import { dataService } from '../lib/dataService';
-import { AdminPasskeyRecord } from '../types';
+import { getAdminAuthHeaders } from '../lib/adminAuthHeaders';
+import { authService, normalizeUsername } from './authService';
+import { AdminPasskeyRecord, AuthSessionUser } from '../types';
 
-const LOCAL_CREDENTIAL_HINT_KEY = 'abf_webauthn_credential_hint';
-const ADMIN_SESSION_TOKEN_KEY = 'abf_admin_session_token';
+const PASSKEYS_STORAGE_KEY = 'abf_user_passkeys_v2';
+const LOCAL_CREDENTIAL_HINT_KEY = 'abf_webauthn_credential_hint_v2';
+
+const passkeyListeners = new Set<(passkeys: AdminPasskeyRecord[]) => void>();
 
 export function detectDeviceName(): string {
   if (typeof navigator === 'undefined') return 'جهاز غير معروف';
@@ -22,29 +25,63 @@ export function detectDeviceName(): string {
   return 'متصفح معتمد';
 }
 
+export function isWebAuthnAvailableInWindow(): boolean {
+  return (
+    typeof window !== 'undefined' &&
+    typeof window.PublicKeyCredential !== 'undefined' &&
+    typeof navigator !== 'undefined' &&
+    Boolean(navigator.credentials) &&
+    browserSupportsWebAuthn()
+  );
+}
+
+function bufferToBase64Url(buf: ArrayBuffer | Uint8Array): string {
+  const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+  let bin = '';
+  for (let i = 0; i < bytes.byteLength; i++) {
+    bin += String.fromCharCode(bytes[i]);
+  }
+  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function base64UrlToUint8Array(base64url: string): Uint8Array {
+  const pad = '='.repeat((4 - (base64url.length % 4)) % 4);
+  const b64 = (base64url + pad).replace(/-/g, '+').replace(/_/g, '/');
+  const raw = atob(b64);
+  const out = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) {
+    out[i] = raw.charCodeAt(i);
+  }
+  return out;
+}
+
+function readLocalPasskeys(): AdminPasskeyRecord[] {
+  try {
+    const raw = localStorage.getItem(PASSKEYS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((p) => p && p.credentialId && p.userId) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeLocalPasskeys(passkeys: AdminPasskeyRecord[]): AdminPasskeyRecord[] {
+  try {
+    localStorage.setItem(PASSKEYS_STORAGE_KEY, JSON.stringify(passkeys));
+  } catch {}
+  passkeyListeners.forEach((cb) => cb(passkeys));
+  return passkeys;
+}
+
+function syncUserCredentialList(userId: string, allPasskeys: AdminPasskeyRecord[]) {
+  const activeIds = allPasskeys
+    .filter((p) => p.userId === userId && p.isActive !== false)
+    .map((p) => p.credentialId);
+  authService.syncUserBiometrics(userId, activeIds);
+}
+
 export const biometricService = {
-  getStoredSessionToken(): string | null {
-    try {
-      return sessionStorage.getItem(ADMIN_SESSION_TOKEN_KEY);
-    } catch {
-      return null;
-    }
-  },
-
-  setStoredSessionToken(token: string | null): void {
-    try {
-      if (token) {
-        sessionStorage.setItem(ADMIN_SESSION_TOKEN_KEY, token);
-      } else {
-        sessionStorage.removeItem(ADMIN_SESSION_TOKEN_KEY);
-      }
-      // Clean up legacy insecure flags if present
-      localStorage.removeItem('abf_admin_authenticated');
-      sessionStorage.removeItem('abf_admin_authenticated');
-      localStorage.removeItem('abf_biometric_enrolled');
-    } catch {}
-  },
-
   getLocalCredentialHint(): string | null {
     try {
       return localStorage.getItem(LOCAL_CREDENTIAL_HINT_KEY);
@@ -55,132 +92,267 @@ export const biometricService = {
 
   async isPlatformSupported(): Promise<boolean> {
     try {
-      if (!browserSupportsWebAuthn()) return false;
+      if (!isWebAuthnAvailableInWindow()) return false;
+      if (typeof window.PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable === 'function') {
+        const available = await window.PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable();
+        if (available) return true;
+      }
       return await platformAuthenticatorIsAvailable();
     } catch {
       return false;
     }
   },
 
-  async hasRegisteredPasskey(): Promise<{
-    hasAny: boolean;
-    thisDeviceMatch: AdminPasskeyRecord | null;
-    allPasskeys: AdminPasskeyRecord[];
-  }> {
-    const allPasskeys = await dataService.getActivePasskeys();
-    const localId = this.getLocalCredentialHint();
-    const thisDeviceMatch =
-      (localId && allPasskeys.find((p) => p.credentialId === localId)) || allPasskeys[0] || null;
-    return {
-      hasAny: allPasskeys.length > 0,
-      thisDeviceMatch,
-      allPasskeys,
+  listPasskeys(userId?: string): AdminPasskeyRecord[] {
+    const all = readLocalPasskeys().filter((p) => p.isActive !== false);
+    if (!userId) return all;
+    return all.filter((p) => p.userId === userId);
+  },
+
+  subscribePasskeys(callback: (passkeys: AdminPasskeyRecord[]) => void, userId?: string): () => void {
+    const wrapped = (all: AdminPasskeyRecord[]) => {
+      const active = all.filter((p) => p.isActive !== false);
+      callback(userId ? active.filter((p) => p.userId === userId) : active);
+    };
+    passkeyListeners.add(wrapped);
+    wrapped(readLocalPasskeys());
+    return () => {
+      passkeyListeners.delete(wrapped);
     };
   },
 
   /**
-   * Step-up Server-Verified WebAuthn Registration
-   * Requires signed-in verified Google owner (alahsaey@gmail.com)
+   * Returns active passkeys eligible for biometric login on this device,
+   * optionally narrowed by a typed username. Only returns passkeys whose
+   * linked user account is currently active and has biometricEnabled=true.
    */
-  async enrollDevice(customDeviceLabel?: string): Promise<{
+  getEligiblePasskeys(usernameHint?: string): AdminPasskeyRecord[] {
+    const cleanHint = usernameHint ? normalizeUsername(usernameHint) : '';
+    const all = readLocalPasskeys().filter((p) => p.isActive !== false);
+
+    return all.filter((pk) => {
+      const user = authService.findUserById(pk.userId) || authService.findUserByUsername(pk.username);
+      if (!user || !user.isActive || !user.biometricEnabled) return false;
+      if (cleanHint && normalizeUsername(user.username) !== cleanHint) return false;
+      return true;
+    });
+  },
+
+  async hasRegisteredPasskey(usernameHint?: string): Promise<{
+    supported: boolean;
+    hasAny: boolean;
+    thisDeviceMatch: AdminPasskeyRecord | null;
+    allPasskeys: AdminPasskeyRecord[];
+  }> {
+    const supported = await this.isPlatformSupported();
+    const eligible = this.getEligiblePasskeys(usernameHint);
+    const localId = this.getLocalCredentialHint();
+    const thisDeviceMatch =
+      (localId && eligible.find((p) => p.credentialId === localId)) || eligible[0] || null;
+    return {
+      supported,
+      hasAny: eligible.length > 0,
+      thisDeviceMatch,
+      allPasskeys: eligible,
+    };
+  },
+
+  /**
+   * Enrolls this device's biometric authenticator (Fingerprint / Face ID / Windows Hello)
+   * directly for the currently logged-in user (super_admin, admin, or operator).
+   * Uses server-verified WebAuthn when Express is reachable, and native WebAuthn API on static hosts.
+   */
+  async enrollDeviceForUser(
+    user: AuthSessionUser,
+    customDeviceLabel?: string
+  ): Promise<{
     success: boolean;
     passkey?: AdminPasskeyRecord;
     error?: string;
   }> {
+    const deviceName = customDeviceLabel?.trim() || detectDeviceName();
+
     try {
-      if (!browserSupportsWebAuthn()) {
-        return { success: false, error: 'المتصفح الحالي لا يدعم تقنية مفاتيح المرور (WebAuthn).' };
+      if (!isWebAuthnAvailableInWindow()) {
+        return {
+          success: false,
+          error: 'المتصفح أو الجهاز الحالي لا يدعم تقنية البصمة ومفاتيح المرور (WebAuthn).',
+        };
       }
 
-      const currentUser = auth.currentUser;
-      if (!currentUser) {
-        return { success: false, error: 'يجب تسجيل الدخول بحساب Google المعتمد أولاً قبل تفعيل البصمة.' };
+      const existing = readLocalPasskeys();
+      const userPasskeys = existing.filter((p) => p.userId === user.id && p.isActive !== false);
+      let createdPasskey: AdminPasskeyRecord | null = null;
+
+      // 1. Try server-verified WebAuthn registration if Express backend is reachable
+      if (authService.getSessionToken()) {
+        try {
+          const headers = await getAdminAuthHeaders({ 'Content-Type': 'application/json' });
+          const optsRes = await fetch('/api/auth/webauthn/register-options', {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+              clientOrigin: window.location.origin,
+              excludeCredentialIds: userPasskeys.map((p) => p.credentialId),
+            }),
+          });
+
+          const optsCT = optsRes.headers.get('content-type') || '';
+          if (optsRes.ok && optsCT.includes('application/json')) {
+            const optsData = await optsRes.json();
+            const registrationResponse = await startRegistration({
+              optionsJSON: optsData.options,
+            });
+
+            const verifyRes = await fetch('/api/auth/webauthn/register-verify', {
+              method: 'POST',
+              headers,
+              body: JSON.stringify({
+                registrationResponse,
+                challengeToken: optsData.challengeToken,
+                deviceName,
+              }),
+            });
+
+            const verifyCT = verifyRes.headers.get('content-type') || '';
+            if (verifyRes.ok && verifyCT.includes('application/json')) {
+              const verifyData = await verifyRes.json();
+              if (verifyData?.verified && verifyData?.passkey) {
+                createdPasskey = {
+                  ...verifyData.passkey,
+                  id: verifyData.passkey.credentialId,
+                  userId: user.id,
+                  username: user.username,
+                  fullName: user.fullName,
+                  role: user.role,
+                  verificationMode: 'server',
+                  createdAt: new Date().toISOString(),
+                };
+              }
+            }
+          }
+        } catch (serverErr: any) {
+          // If user explicitly cancelled the biometric prompt, stop immediately
+          if (
+            serverErr?.name === 'NotAllowedError' ||
+            serverErr?.name === 'InvalidStateError' ||
+            serverErr?.name === 'SecurityError'
+          ) {
+            throw serverErr;
+          }
+          // Otherwise fall through to native browser WebAuthn for static Cloudflare Pages hosting
+        }
       }
 
-      const idToken = await currentUser.getIdToken(true);
-      const existingPasskeys = await dataService.getActivePasskeys();
-      const deviceName = customDeviceLabel?.trim() || detectDeviceName();
+      // 2. Native browser WebAuthn fallback (Cloudflare Pages / static deployment)
+      if (!createdPasskey) {
+        const challenge = new Uint8Array(32);
+        crypto.getRandomValues(challenge);
+        const rpId = window.location.hostname;
+        const userIdBytes = new TextEncoder().encode(user.id);
 
-      // 1. Get challenge & registration options from server
-      const optsRes = await fetch('/api/auth/webauthn/register-options', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${idToken}`,
-        },
-        body: JSON.stringify({
-          clientOrigin: window.location.origin,
-          excludeCredentialIds: existingPasskeys.map((p) => p.credentialId),
-        }),
-      });
+        const credential = (await navigator.credentials.create({
+          publicKey: {
+            challenge,
+            rp: {
+              name: 'مسابقة أبو الفواطم',
+              id: rpId,
+            },
+            user: {
+              id: userIdBytes,
+              name: user.username,
+              displayName: user.fullName || user.username,
+            },
+            pubKeyCredParams: [
+              { type: 'public-key', alg: -7 }, // ES256
+              { type: 'public-key', alg: -257 }, // RS256
+            ],
+            authenticatorSelection: {
+              authenticatorAttachment: 'platform',
+              residentKey: 'preferred',
+              userVerification: 'required',
+            },
+            excludeCredentials: userPasskeys.map((p) => ({
+              id: base64UrlToUint8Array(p.credentialId) as unknown as BufferSource,
+              type: 'public-key' as const,
+            })),
+            timeout: 60000,
+            attestation: 'none',
+          },
+        })) as PublicKeyCredential | null;
 
-      const optsData = await optsRes.json();
-      if (!optsRes.ok) {
-        return { success: false, error: optsData.error || 'فشل طلب تحدي التسجيل من الخادم.' };
-      }
+        if (!credential) {
+          return { success: false, error: 'لم يتم إنشاء مفتاح البصمة على الجهاز.' };
+        }
 
-      // 2. Prompt native OS biometric authenticator (Fingerprint / FaceID / TouchID)
-      const registrationResponse = await startRegistration({
-        optionsJSON: optsData.options,
-      });
+        const credentialId = bufferToBase64Url(credential.rawId);
+        const response = credential.response as AuthenticatorAttestationResponse;
+        const publicKeyBuf =
+          typeof response.getPublicKey === 'function' ? response.getPublicKey() : null;
+        const publicKeyB64 = publicKeyBuf ? bufferToBase64Url(publicKeyBuf) : '';
 
-      // 3. Verify cryptographic attestation on the server
-      const verifyRes = await fetch('/api/auth/webauthn/register-verify', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${idToken}`,
-        },
-        body: JSON.stringify({
-          registrationResponse,
-          challengeToken: optsData.challengeToken,
+        createdPasskey = {
+          id: credentialId,
+          credentialId,
+          userId: user.id,
+          username: user.username,
+          fullName: user.fullName,
+          role: user.role,
+          publicKeyB64,
+          counter: 0,
+          transports: typeof response.getTransports === 'function' ? response.getTransports() : ['internal'],
+          rpId,
           deviceName,
-        }),
-      });
-
-      const verifyData = await verifyRes.json();
-      if (!verifyRes.ok || !verifyData.verified || !verifyData.passkey) {
-        await dataService.logSecurityEvent({
-          eventType: 'biometric_enrolled',
-          email: currentUser.email || '',
-          deviceName,
-          authMethod: 'webauthn',
-          result: 'failed',
-          details: verifyData.error || 'فشل التحقق التشفيري من تسجيل البصمة',
-        });
-        return { success: false, error: verifyData.error || 'فشل التحقق التشفيري من البصمة على الخادم.' };
+          isActive: true,
+          integrityHash: '',
+          verificationMode: 'client',
+          createdAt: new Date().toISOString(),
+          lastUsedAt: new Date().toISOString(),
+        };
       }
 
-      // 4. Persist verified public-key credential to Firestore (no raw biometric data!)
-      await dataService.savePasskey(verifyData.passkey);
+      const nextList = [
+        ...existing.filter((p) => p.credentialId !== createdPasskey!.credentialId),
+        createdPasskey,
+      ];
+      writeLocalPasskeys(nextList);
+      syncUserCredentialList(user.id, nextList);
+
       try {
-        localStorage.setItem(LOCAL_CREDENTIAL_HINT_KEY, verifyData.passkey.credentialId);
+        localStorage.setItem(LOCAL_CREDENTIAL_HINT_KEY, createdPasskey.credentialId);
       } catch {}
+
+      // Best-effort cloud sync (non-blocking if Firestore is offline)
+      dataService.savePasskey(createdPasskey).catch(() => {});
 
       await dataService.logSecurityEvent({
         eventType: 'biometric_enrolled',
-        email: currentUser.email || '',
+        username: user.username,
+        email: user.username,
+        actorName: user.fullName,
         deviceName,
         authMethod: 'webauthn',
         result: 'success',
-        details: `تم تسجيل مفتاح بصمة موثق (${verifyData.passkey.credentialId.slice(0, 12)}...)`,
+        details: `تم تفعيل الدخول بالبصمة لحساب (@${user.username}) على الجهاز: ${deviceName}`,
       });
 
-      return { success: true, passkey: verifyData.passkey };
+      return { success: true, passkey: createdPasskey };
     } catch (err: any) {
       const msg =
         err?.name === 'NotAllowedError'
-          ? 'تم إلغاء عملية البصمة أو رفض الإذن من الجهاز.'
+          ? 'تم إلغاء عملية البصمة أو لم يتم التحقق من الهوية على الجهاز.'
           : err?.name === 'SecurityError'
-            ? 'البيئة الحالية أو النطاق يمنع تشغيل مستشعر WebAuthn. افتح الموقع مباشرة عبر HTTPS.'
+            ? 'تعذر تشغيل مستشعر البصمة داخل الإطار الحالي. افتح رابط الموقع مباشرة عبر HTTPS.'
             : err?.name === 'InvalidStateError'
-              ? 'هذا الجهاز مسجل بالفعل مسبقاً ببصمة نشطة.'
+              ? 'هذا الجهاز مسجل بالفعل مسبقاً ببصمة نشطة لهذا الحساب.'
               : err?.message || 'حدث خطأ أثناء تفعيل بصمة الجهاز.';
 
       await dataService.logSecurityEvent({
         eventType: 'biometric_enrolled',
-        email: auth.currentUser?.email || '',
-        deviceName: detectDeviceName(),
+        username: user.username,
+        email: user.username,
+        actorName: user.fullName,
+        deviceName,
         authMethod: 'webauthn',
         result: 'failed',
         details: msg,
@@ -191,128 +363,188 @@ export const biometricService = {
   },
 
   /**
-   * Server-verified WebAuthn Passkey Authentication
+   * Verifies biometric authentication via WebAuthn and grants the exact linked user's session.
    */
-  async verifyBiometric(): Promise<{
+  async verifyBiometricLogin(usernameHint?: string): Promise<{
     success: boolean;
-    email?: string;
-    adminSessionToken?: string;
+    user?: AuthSessionUser;
     error?: string;
   }> {
     const deviceName = detectDeviceName();
-    try {
-      if (!browserSupportsWebAuthn()) {
-        return { success: false, error: 'المتصفح الحالي لا يدعم المصادقة البيومترية (WebAuthn).' };
-      }
 
-      const activePasskeys = await dataService.getActivePasskeys();
-      if (activePasskeys.length === 0) {
+    try {
+      if (!isWebAuthnAvailableInWindow()) {
         return {
           success: false,
-          error: 'لا توجد أجهزة مفعلة بالبصمة بعد. سجّل الدخول بحساب Google المعتمد ثم فعّل البصمة من الإعدادات.',
+          error: 'المتصفح الحالي لا يدعم المصادقة بالبصمة (WebAuthn).',
+        };
+      }
+
+      const eligible = this.getEligiblePasskeys(usernameHint);
+      if (eligible.length === 0) {
+        return {
+          success: false,
+          error: usernameHint
+            ? `لا توجد بصمة مسجلة ومفعّلة للحساب (${usernameHint}) على هذا الجهاز.`
+            : 'لا توجد بصمة مفعّلة على هذا الجهاز بعد. سجّل الدخول باسم المستخدم وكلمة المرور أولاً ثم فعّل البصمة من الإعدادات.',
         };
       }
 
       const localHint = this.getLocalCredentialHint();
-      const preferredOrder = localHint
+      const ordered = localHint
         ? [
-            ...activePasskeys.filter((p) => p.credentialId === localHint),
-            ...activePasskeys.filter((p) => p.credentialId !== localHint),
+            ...eligible.filter((p) => p.credentialId === localHint),
+            ...eligible.filter((p) => p.credentialId !== localHint),
           ]
-        : activePasskeys;
+        : eligible;
 
-      // 1. Request challenge from server
-      const optsRes = await fetch('/api/auth/webauthn/login-options', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          clientOrigin: window.location.origin,
-          credentialIds: preferredOrder.map((p) => p.credentialId),
-        }),
-      });
+      const hasServerSealed = ordered.some((p) => p.verificationMode === 'server' && p.integrityHash);
+      let matchedPasskey: AdminPasskeyRecord | undefined;
+      let serverToken: string | null = null;
+      let newCounter: number | undefined;
 
-      const optsData = await optsRes.json();
-      if (!optsRes.ok) {
-        return { success: false, error: optsData.error || 'تعذر بدء تحدي البصمة.' };
+      // 1. Try server-verified WebAuthn assertion when passkey has server seal & Express is reachable
+      if (hasServerSealed) {
+        try {
+          const serverCandidates = ordered.filter((p) => p.verificationMode === 'server' && p.integrityHash);
+          const optsRes = await fetch('/api/auth/webauthn/login-options', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              clientOrigin: window.location.origin,
+              credentialIds: serverCandidates.map((p) => p.credentialId),
+            }),
+          });
+
+          const optsCT = optsRes.headers.get('content-type') || '';
+          if (optsRes.ok && optsCT.includes('application/json')) {
+            const optsData = await optsRes.json();
+            const assertionResponse = await startAuthentication({
+              optionsJSON: optsData.options,
+            });
+
+            const candidate = serverCandidates.find((p) => p.credentialId === assertionResponse.id);
+            if (!candidate) {
+              return { success: false, error: 'مفتاح البصمة غير مرتبط بحساب نشط.' };
+            }
+
+            const verifyRes = await fetch('/api/auth/webauthn/login-verify', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                assertionResponse,
+                challengeToken: optsData.challengeToken,
+                passkeyRecord: candidate,
+              }),
+            });
+
+            const verifyCT = verifyRes.headers.get('content-type') || '';
+            if (verifyRes.ok && verifyCT.includes('application/json')) {
+              const verifyData = await verifyRes.json();
+              if (verifyData?.verified) {
+                matchedPasskey = candidate;
+                serverToken = verifyData.adminSessionToken || null;
+                newCounter = verifyData.newCounter;
+              } else {
+                return { success: false, error: verifyData?.error || 'فشلت مطابقة التوقيع التشفيري للبصمة.' };
+              }
+            }
+          }
+        } catch (serverErr: any) {
+          if (serverErr?.name === 'NotAllowedError' || serverErr?.name === 'SecurityError') {
+            throw serverErr;
+          }
+          // Fall through to native WebAuthn assertion if server is unavailable (e.g. Cloudflare Pages)
+        }
       }
 
-      // 2. Prompt OS biometric hardware
-      const assertionResponse = await startAuthentication({
-        optionsJSON: optsData.options,
-      });
-
-      const matchedPasskey = activePasskeys.find((p) => p.credentialId === assertionResponse.id);
+      // 2. Native WebAuthn platform verification (Cloudflare Pages / client-bound passkey)
       if (!matchedPasskey) {
-        await dataService.logSecurityEvent({
-          eventType: 'biometric_login_failed',
-          deviceName,
-          authMethod: 'webauthn',
-          result: 'blocked',
-          details: 'محاولة دخول بمفتاح غير مسجل في قائمة الأجهزة الموثوقة.',
-        });
-        return { success: false, error: 'هذا المفتاح غير مسجل أو تم إلغاء صلاحيته.' };
+        const challenge = new Uint8Array(32);
+        crypto.getRandomValues(challenge);
+        const rpId = window.location.hostname;
+
+        const assertion = (await navigator.credentials.get({
+          publicKey: {
+            challenge,
+            rpId,
+            userVerification: 'required',
+            allowCredentials: ordered.map((p) => ({
+              id: base64UrlToUint8Array(p.credentialId) as unknown as BufferSource,
+              type: 'public-key' as const,
+            })),
+            timeout: 60000,
+          },
+        })) as PublicKeyCredential | null;
+
+        if (!assertion) {
+          return { success: false, error: 'تعذر التحقق من البصمة على الجهاز.' };
+        }
+
+        const assertedId = bufferToBase64Url(assertion.rawId);
+        matchedPasskey = ordered.find((p) => p.credentialId === assertedId);
+        if (!matchedPasskey) {
+          return { success: false, error: 'البصمة المستخدمة غير مسجلة أو تم إلغاء صلاحيتها.' };
+        }
       }
 
-      // 3. Cryptographic signature verification on server
-      const verifyRes = await fetch('/api/auth/webauthn/login-verify', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          assertionResponse,
-          challengeToken: optsData.challengeToken,
-          passkeyRecord: matchedPasskey,
-        }),
-      });
+      // Resolve the exact linked user and verify they are still active & biometric-enabled
+      const linkedUser =
+        authService.findUserById(matchedPasskey.userId) ||
+        authService.findUserByUsername(matchedPasskey.username);
 
-      const verifyData = await verifyRes.json();
-      if (!verifyRes.ok || !verifyData.verified) {
-        await dataService.logSecurityEvent({
-          eventType: 'biometric_login_failed',
-          email: 'alahsaey@gmail.com',
-          deviceName: matchedPasskey.deviceName || deviceName,
-          authMethod: 'webauthn',
-          result: 'failed',
-          details: verifyData.error || 'فشل التحقق من التوقيع البيومتري.',
-        });
-        return { success: false, error: verifyData.error || 'فشلت مطابقة التوقيع التشفيري للبصمة.' };
+      if (!linkedUser) {
+        return { success: false, error: 'الحساب المرتبط بهذه البصمة لم يعد موجوداً.' };
+      }
+      if (!linkedUser.isActive) {
+        return { success: false, error: 'تم تعطيل هذا الحساب من قبل الإدارة ولا يمكن الدخول به.' };
+      }
+      if (!linkedUser.biometricEnabled) {
+        return { success: false, error: 'تم تعطيل الدخول بالبصمة على هذا الحساب.' };
       }
 
-      this.setStoredSessionToken(verifyData.adminSessionToken);
+      // Update usage metadata
+      const all = readLocalPasskeys().map((p) =>
+        p.credentialId === matchedPasskey!.credentialId
+          ? {
+              ...p,
+              counter: newCounter ?? (p.counter || 0) + 1,
+              lastUsedAt: new Date().toISOString(),
+            }
+          : p
+      );
+      writeLocalPasskeys(all);
+
       try {
         localStorage.setItem(LOCAL_CREDENTIAL_HINT_KEY, matchedPasskey.credentialId);
       } catch {}
 
-      if (auth.currentUser?.email?.toLowerCase() === 'alahsaey@gmail.com') {
-        await dataService.updatePasskey(matchedPasskey.credentialId, {
-          counter: verifyData.newCounter,
-          lastUsedAt: new Date().toISOString(),
-        });
-      }
+      const sessionUser = authService.completeBiometricSession(linkedUser, serverToken);
 
       await dataService.logSecurityEvent({
         eventType: 'biometric_login_success',
-        email: verifyData.email,
+        username: linkedUser.username,
+        email: linkedUser.username,
+        actorName: linkedUser.fullName,
         deviceName: matchedPasskey.deviceName || deviceName,
         authMethod: 'webauthn',
         result: 'success',
-        details: 'تم التحقق من البصمة عبر الخادم ومنح جلسة إدارة موثقة.',
+        details: `دخول ناجح بالبصمة لحساب (@${linkedUser.username}).`,
       });
 
-      return {
-        success: true,
-        email: verifyData.email,
-        adminSessionToken: verifyData.adminSessionToken,
-      };
+      return { success: true, user: sessionUser };
     } catch (err: any) {
       const msg =
         err?.name === 'NotAllowedError'
-          ? 'تم إلغاء الفحص البيومتري أو تعذر التحقق من بصمة الجهاز.'
+          ? 'تم إلغاء الفحص البيومتري أو لم تتطابق البصمة.'
           : err?.name === 'SecurityError'
-            ? 'تعذر تشغيل WebAuthn داخل الإطار الحالي. افتح الموقع مباشرة عبر HTTPS.'
-            : err?.message || 'فشل التحقق البيومتري.';
+            ? 'تعذر تشغيل مستشعر البصمة داخل الإطار الحالي. افتح الموقع مباشرة عبر HTTPS.'
+            : err?.message || 'تعذر إكمال التحقق بالبصمة.';
 
       await dataService.logSecurityEvent({
         eventType: 'biometric_login_failed',
+        username: usernameHint || '',
+        email: usernameHint || '',
         deviceName,
         authMethod: 'webauthn',
         result: 'failed',
@@ -323,66 +555,64 @@ export const biometricService = {
     }
   },
 
-  async revokePasskey(credentialId: string, deviceName?: string): Promise<void> {
-    await dataService.deletePasskey(credentialId);
-    const hint = this.getLocalCredentialHint();
-    if (hint === credentialId) {
+  async revokePasskey(credentialId: string, actorUsername: string): Promise<void> {
+    const existing = readLocalPasskeys();
+    const target = existing.find((p) => p.credentialId === credentialId);
+    const remaining = existing.filter((p) => p.credentialId !== credentialId);
+    writeLocalPasskeys(remaining);
+
+    if (target) {
+      syncUserCredentialList(target.userId, remaining);
+    }
+
+    if (this.getLocalCredentialHint() === credentialId) {
       try {
         localStorage.removeItem(LOCAL_CREDENTIAL_HINT_KEY);
       } catch {}
     }
+
+    dataService.deletePasskey(credentialId).catch(() => {});
+
     await dataService.logSecurityEvent({
       eventType: 'biometric_revoked',
-      email: auth.currentUser?.email || 'alahsaey@gmail.com',
-      deviceName: deviceName || detectDeviceName(),
+      username: target?.username || actorUsername,
+      email: target?.username || actorUsername,
+      actorName: actorUsername,
+      deviceName: target?.deviceName || detectDeviceName(),
       authMethod: 'webauthn',
       result: 'success',
-      details: `تم إزالة وتجميد بصمة الجهاز (${credentialId.slice(0, 12)}...)`,
+      details: `إلغاء تفعيل بصمة الجهاز (${target?.deviceName || credentialId.slice(0, 10)}) لحساب (@${target?.username || actorUsername}).`,
     });
   },
 
-  async verifyCurrentAdminSession(): Promise<{
-    authenticated: boolean;
-    email?: string;
-    isOwner?: boolean;
-    authMethod?: string;
-  }> {
-    try {
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (auth.currentUser) {
-        const idToken = await auth.currentUser.getIdToken();
-        headers.Authorization = `Bearer ${idToken}`;
-      }
-      const adminSessionToken = this.getStoredSessionToken();
-      const res = await fetch('/api/auth/session/verify', {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ adminSessionToken }),
-      });
-      if (!res.ok) return { authenticated: false };
-      return await res.json();
-    } catch {
-      return { authenticated: false };
+  async resetUserBiometrics(userId: string, actorUsername: string): Promise<void> {
+    const existing = readLocalPasskeys();
+    const removed = existing.filter((p) => p.userId === userId);
+    const remaining = existing.filter((p) => p.userId !== userId);
+    writeLocalPasskeys(remaining);
+    authService.syncUserBiometrics(userId, []);
+
+    const localHint = this.getLocalCredentialHint();
+    if (localHint && removed.some((p) => p.credentialId === localHint)) {
+      try {
+        localStorage.removeItem(LOCAL_CREDENTIAL_HINT_KEY);
+      } catch {}
     }
-  },
 
-  async logoutAdminSession(): Promise<void> {
-    const token = this.getStoredSessionToken();
-    try {
-      await fetch('/api/auth/logout', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ adminSessionToken: token }),
-      });
-    } catch {}
-    await dataService.logSecurityEvent({
-      eventType: 'admin_logout',
-      email: auth.currentUser?.email || '',
-      deviceName: detectDeviceName(),
-      authMethod: 'system',
-      result: 'success',
-      details: 'تسجيل خروج صريح وإلغاء رمز جلسة الإدارة.',
+    removed.forEach((p) => {
+      dataService.deletePasskey(p.credentialId).catch(() => {});
     });
-    this.setStoredSessionToken(null);
+
+    const targetUser = authService.findUserById(userId);
+    await dataService.logSecurityEvent({
+      eventType: 'biometric_revoked',
+      username: targetUser?.username || userId,
+      email: targetUser?.username || userId,
+      actorName: actorUsername,
+      deviceName: detectDeviceName(),
+      authMethod: 'webauthn',
+      result: 'success',
+      details: `إعادة ضبط كافة بصمات المستخدم (@${targetUser?.username || userId}).`,
+    });
   },
 };

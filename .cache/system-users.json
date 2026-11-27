@@ -1,0 +1,14 @@
+[
+  {
+    "id": "user_alahsaey",
+    "username": "alahsaey",
+    "fullName": "الدعم الفني والإدارة العامة",
+    "role": "super_admin",
+    "passwordSalt": "abf_v2_sa_9f4e2c7a1b8d603e5a2f9c4b1e7d3a8c",
+    "passwordHash": "73d7d1280fd05049bf8c65687f80ae03b5b37bc2e4c5fe96ffb2e4f9e6a1586c",
+    "passwordIterations": 120000,
+    "isActive": true,
+    "isProtected": true,
+    "createdAt": "2026-01-01T00:00:00.000Z"
+  }
+]
